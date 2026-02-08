@@ -1139,7 +1139,12 @@ def omron_sync_device_to_garmin(
     startdateStr = datetime.fromtimestamp(startLocal).date().isoformat()
     enddateStr = datetime.fromtimestamp(endLocal).date().isoformat()
 
-    L.info(f"Start synchronizing device '{ocDev.name}' from {startdateStr} to {enddateStr}")
+    if startdateStr == enddateStr:
+        L.info(f"Start synchronizing device '{ocDev.name}' for {startdateStr}")
+
+    else:
+        L.info(f"Start synchronizing device '{ocDev.name}' from {startdateStr} to {enddateStr}")
+
     assert ocDev.category is not None, "Device category must be set for sync"
     L.debug(
         f"Device details: MAC={ocDev.macaddr}, Serial={ocDev.serial}, User={ocDev.user}, Category={ocDev.category.name}"
