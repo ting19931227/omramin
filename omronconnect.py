@@ -519,7 +519,7 @@ class OmronConnect1(OmronConnect):
                                 devices.setdefault(
                                     key,
                                     {
-                                        "deviceCategory": cat["deviceCategory"],
+                                        "deviceCategory": cat.get("deviceCategory"),
                                         "deviceModel": model["deviceModel"],
                                         "deviceSerialID": dev["deviceSerialID"],
                                         "userNumberInDevice": dev["userNumberInDevice"],
@@ -536,15 +536,25 @@ class OmronConnect1(OmronConnect):
         result: list[OmronDevice] = []
         for device in devices.values():
             category = None
-            try:
-                deviceCategory = device.get("deviceCategory")
-                if deviceCategory is None or deviceCategory == "":
-                    deviceCategory = omron_name_to_device_category(device.get("deviceModel"), country=self._country)
+            deviceCategory = device.get("deviceCategory")
+            categoryFromAPI = deviceCategory is not None and deviceCategory != ""
 
-                category = DeviceCategory(str(deviceCategory))
+            # If API didn't provide category, try inference
+            if not categoryFromAPI:
+                deviceCategory = omron_model_to_device_category(device.get("deviceModel"))
 
-            except (ValueError, KeyError):
-                L.warning(f"Device with unknown category: {device.get('deviceModel', 'unknown')}")
+            if deviceCategory is not None and deviceCategory != "":
+                try:
+                    category = DeviceCategory(str(deviceCategory))
+
+                except ValueError:
+                    L.debug(
+                        f"Skipping device with unsupported category '{deviceCategory}': {device.get('deviceModel')}"
+                    )
+                    continue
+
+            else:
+                L.warning(f"Device with unknown category {device.get('deviceModel')}")
 
             ocDev = OmronDevice(
                 category=category,
@@ -823,15 +833,24 @@ class OmronConnect2(OmronConnect):
                 continue
 
             category = None
-            try:
-                deviceCategory = attrs.get("deviceCategory")
-                if deviceCategory is None or deviceCategory == "":
-                    deviceCategory = omron_name_to_device_category(attrs.get("name"), country=self._country)
+            deviceCategory = attrs.get("deviceCategory")
+            categoryFromAPI = deviceCategory is not None and deviceCategory != ""
 
-                category = DeviceCategory(str(deviceCategory))
+            # If API didn't provide category, try inference
+            if not categoryFromAPI:
+                deviceModel = attrs.get("deviceModel", attrs.get("identifier"))
+                deviceCategory = omron_model_to_device_category(deviceModel)
 
-            except (ValueError, KeyError):
-                L.warning(f"Device with unknown category: {attrs.get('name', 'unknown')}")
+            if deviceCategory is not None and deviceCategory != "":
+                try:
+                    category = DeviceCategory(str(deviceCategory))
+
+                except ValueError:
+                    L.debug(f"Skipping device with unsupported category '{deviceCategory}': {attrs.get('name')}")
+                    continue
+
+            else:
+                L.warning(f"Device with unknown category {device.get('deviceModel')}")
 
             # Create OmronDevice
             deviceModel = attrs.get("deviceModel", attrs.get("identifier", "Unknown"))
@@ -1064,88 +1083,19 @@ class OmronClient:
 
 
 @cache
-def omron_name_to_device_category(
-    devname: str,
-    *,
-    country: str,
-    scale_keywords: T.Optional[list[str]] = None,
-    bpm_keywords: T.Optional[list[str]] = None,
-    user_agent: T.Optional[str] = None,
-) -> T.Optional[DeviceCategory]:
-    try:
-        from selectolax.parser import HTMLParser
-
-    except ImportError:
+def omron_model_to_device_category(model: str) -> T.Optional[DeviceCategory]:
+    if not model:
         return None
 
-    if not devname:
-        return None
-
-    SEARCH_URL = "https://html.duckduckgo.com/html/"
-    USER_AGENT = user_agent or (
-        "Mozilla/5.0 (Linux; Android 10; K) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.133 Mobile Safari/537.36"
-    )
-
-    # hard facts: keywords seen across Omron product pages
-    DEVICE_KEYWORDS = {
-        "scale": scale_keywords
-        or [
-            "scale",
-            "body composition",
-            "body fat",
-            "weight scale",
-            "smart scale",
-        ],
-        "bpm": bpm_keywords
-        or [
-            "blood pressure",
-            "blood-pressure",
-            "bpm",
-            "sphygmomanometer",
-            "arm cuff",
-            "wrist cuff",
-        ],
+    RX = {
+        re.compile(r"^(HEM-|X[0-9]+ Smart)", re.IGNORECASE): DeviceCategory.BPM,
+        re.compile(r"^(HBF-|Body Composition Monitor)|(VIVA$)", re.IGNORECASE): DeviceCategory.SCALE,
     }
 
-    def infer_device_type(text: str) -> str:
-        text = text.lower()
-        for dev_type, kwds in DEVICE_KEYWORDS.items():
-            for kw in kwds:
-                if kw in text:
-                    return dev_type.upper()
+    for pattern, cat in RX.items():
+        if pattern.search(model):
+            L.debug(f"Device {model} matched pattern {pattern.pattern} -> {cat.name}")
+            return cat
 
-        return ""
-
-    def query_ddg() -> str:
-        params = {
-            "q": f"omron+{devname}",
-            "kl": f"{country.lower()}-en",  # "wt-wt"
-        }
-
-        headers = {
-            "User-Agent": USER_AGENT
-            or "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.133 Mobile Safari/537.36",
-        }
-
-        with httpx.Client(timeout=10.0, headers=headers) as client:
-            r = client.post(SEARCH_URL, data=params)
-            r.raise_for_status()
-
-        tree = HTMLParser(r.text)
-
-        # titles + snippets
-        texts = [node.text(strip=True) for node in tree.css("a.result__a, a.result__snippet")]
-
-        combined = " ".join(t.strip() for t in texts if t.strip())
-        return infer_device_type(combined)
-
-    try:
-        category_name = query_ddg()
-        if category_name:
-            return DeviceCategory[category_name]  # Lookup by name, not value
-
-        return None
-
-    except Exception:  # pylint: disable=broad-exception-caught
-        return None
+    L.debug(f"Device {model} does not match any known patterns")
+    return None
