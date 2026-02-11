@@ -392,8 +392,8 @@ class OmronConnect(ABC):
 
 
 class OmronConnect1(OmronConnect):
-    _OGSC_APP_VERSION = "010.003.00001"
-    _OGSC_SDK_VERSION = "000.101"
+    _OGSC_APP_VERSION = "011.004.00000"
+    _OGSC_SDK_VERSION = "000.005"
 
     _USER_AGENT = f"OmronConnect/{_OGSC_APP_VERSION}.001 CFNetwork/1335.0.3.4 Darwin/21.6.0)"
 
@@ -516,6 +516,11 @@ class OmronConnect1(OmronConnect):
                         for dev in model.get("deviceSerialIDList", []):
                             try:
                                 key = f"{dev['deviceSerialID']}:{dev['userNumberInDevice']}"
+                                # ignore devices with userNumberInDevice = 0
+                                # 0: is device it self, not a user profile
+                                if f"{dev.get('userNumberInDevice')}" == "0":
+                                    continue
+
                                 devices.setdefault(
                                     key,
                                     {
@@ -526,8 +531,8 @@ class OmronConnect1(OmronConnect):
                                     },
                                 )
 
-                            except KeyError:
-                                L.debug("Skipping device with missing required fields")
+                            except KeyError as e:
+                                L.debug(f"Skipping device with missing required fields: {e}")
                                 continue
 
             return devices
@@ -578,7 +583,7 @@ class OmronConnect1(OmronConnect):
             "userNumberInDevice": int(device.user),
             "searchDateFrom": searchDateFrom if searchDateFrom >= 0 else 0,
             "searchDateTo": int(U.utcnow().timestamp() * 1000) if searchDateTo <= 0 else searchDateTo,
-            # "deviceModel": "OSG",
+            # "deviceModel": "OGSC", "HBF-xxx", ...
         }
 
         r = self._client.post(
