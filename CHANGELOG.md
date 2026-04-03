@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.0
+
+- **Garmin auth rewritten**: Migrated to garminconnect>=0.3.0 due to Garmin SSO/OAuth changes; replaces garth-based authentication. Re-login required.
+
 ## v0.2.0
 
 ### Installation & Setup
