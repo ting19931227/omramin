@@ -3,9 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "click>=8.1.7",
-#   "garminconnect>=0.2.25",
-#   "garth>=0.5.21; python_version >= '3.14'",
-#   "garth>=0.5.0; python_version < '3.14'",
+#   "garminconnect>=0.3.0",
 #   "httpx[http2,cli,brotli]>=0.28.1",
 #   "inquirer>=3.4.0",
 #   "json5>=0.10.0",
@@ -39,7 +37,6 @@ from functools import cache, wraps
 
 import click
 import garminconnect as GC
-import garth
 import inquirer
 import keyring
 from dateutil import parser as dateutil_parser
@@ -279,7 +276,6 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
     def get_mfa() -> str:
         return inquirer.text(message="> Enter MFA/2FA code")
 
-    logged_in = False
     try:
         # Load tokens from keyring (requires email)
         tokendata = None
@@ -293,14 +289,10 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
         gc = GC.Garmin(email=email, is_cn=is_cn, prompt_mfa=get_mfa)
 
         L.debug(f"Attempting Garmin login using cached tokens for {email}")
-        logged_in = gc.login(tokendata)
-        if not logged_in:
-            L.debug("Garmin cached tokens invalid, attempting password login")
-            raise FileNotFoundError
-
+        gc.login(tokenstore=tokendata)
         L.debug(f"Garmin login successful using cached tokens for {email}")
 
-    except (FileNotFoundError, binascii.Error, KeyError):
+    except (FileNotFoundError, binascii.Error, KeyError, GC.GarminConnectAuthenticationError):
         # Precedence: env > config > prompt
         password = _E("GARMIN_PASSWORD")
         is_cn_str = _E("GARMIN_IS_CN") or str(gcCfg.get("is_cn", "false"))
@@ -332,9 +324,9 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
 
         gc = GC.Garmin(email=email, password=password, is_cn=is_cn, prompt_mfa=get_mfa)
         try:
-            logged_in = gc.login()
+            gc.login()
 
-        except Exception as login_error:  # pylint: disable=broad-except
+        except GC.GarminConnectAuthenticationError as login_error:
             L.error(f"Login failed: {login_error}")
             L.info("Please re-enter your credentials")
 
@@ -360,36 +352,35 @@ def garmin_login(config_path: str) -> T.Optional[GC.Garmin]:
 
             # Retry login with new credentials
             gc = GC.Garmin(email=email, password=password, is_cn=is_cn, prompt_mfa=get_mfa)
-            logged_in = gc.login()
+            try:
+                gc.login()
 
-        if logged_in:
-            # Save credentials to config (if not from env vars)
-            config_changed = False
-            if not _E("GARMIN_EMAIL"):
-                gcCfg["email"] = email
-                config_changed = True
+            except GC.GarminConnectAuthenticationError as e:
+                raise LoginError(f"Login failed: {e}") from e
 
-            if not _E("GARMIN_IS_CN"):
-                gcCfg["is_cn"] = is_cn
-                config_changed = True
+        # Save credentials to config (if not from env vars)
+        config_changed = False
+        if not _E("GARMIN_EMAIL"):
+            gcCfg["email"] = email
+            config_changed = True
 
-            if config_changed:
-                try:
-                    config["garmin"] = gcCfg
-                    U.json_save(config_path, config)
+        if not _E("GARMIN_IS_CN"):
+            gcCfg["is_cn"] = is_cn
+            config_changed = True
 
-                except (OSError, IOError, ValueError) as e:
-                    L.warning(f"Failed to save config: {e}")
+        if config_changed:
+            try:
+                config["garmin"] = gcCfg
+                U.json_save(config_path, config)
 
-            # Save tokens to keyring
-            save_service_tokens(config_path, "garmin", email, gc.garth.dumps())
+            except (OSError, IOError, ValueError) as e:
+                L.warning(f"Failed to save config: {e}")
 
-    except garth.exc.GarthHTTPError:
+        # Save tokens to keyring
+        save_service_tokens(config_path, "garmin", email, gc.client.dumps())  # pylint: disable=no-member
+
+    except (GC.GarminConnectTooManyRequestsError, GC.GarminConnectConnectionError):
         L.error("Failed to login to Garmin Connect", exc_info=True)
-        return None
-
-    if not logged_in:
-        L.error("Failed to login to Garmin Connect")
         return None
 
     L.info("Logged in to Garmin Connect")
