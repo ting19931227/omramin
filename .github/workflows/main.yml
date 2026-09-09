@@ -10,16 +10,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Inspect Discovery in omramin.py
+      - name: Inspect Omron Connect Source
         run: |
           python - << 'EOF'
-          with open("omramin.py", "r", encoding="utf-8") as f:
-              lines = f.readlines()
-          for i, line in enumerate(lines):
-              if "omron" in line.lower() and ("list" in line.lower() or "device" in line.lower() or "discover" in line.lower()):
-                  start = max(0, i - 2)
-                  end = min(len(lines), i + 20)
-                  print("".join(lines[start:end]))
-                  print("="*40)
-                  break
+          import inspect
+          import omronconnect
+          print("=== try_servers signature ===")
+          print(inspect.signature(omronconnect.try_servers))
+          print("=== omronconnect source lines ===")
+          lines = inspect.getsourcelines(omronconnect.try_servers)[0]
+          print("".join(lines[:25]))
           EOF
