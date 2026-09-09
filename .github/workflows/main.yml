@@ -10,14 +10,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Inspect Omron Connect Source
+      - name: Read omronconnect try_servers function
         run: |
-          python - << 'EOF'
-          import inspect
-          import omronconnect
-          print("=== try_servers signature ===")
-          print(inspect.signature(omronconnect.try_servers))
-          print("=== omronconnect source lines ===")
-          lines = inspect.getsourcelines(omronconnect.try_servers)[0]
-          print("".join(lines[:25]))
-          EOF
+          echo "=== try_servers definition ==="
+          grep -n -A 20 "def try_servers" omronconnect.py
+          echo "=== get_devices definition ==="
+          grep -n -A 20 "def get_devices" omronconnect.py || true
