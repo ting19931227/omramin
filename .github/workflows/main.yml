@@ -16,26 +16,6 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Fetch Devices from OMRON Cloud
-        env:
-          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
-          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+      - name: Inspect OmronConnect Module
         run: |
-          python - << 'EOF'
-          import os, asyncio
-          from omronconnect import OmronConnectClient
-
-          async def main():
-              email = os.environ['OMRON_EMAIL']
-              password = os.environ['OMRON_PASSWORD']
-              print(f"Connecting to OMRON Cloud for: {email}")
-              client = OmronConnectClient()
-              await client.login(email, password)
-              devices = await client.get_devices()
-              print("\n=== YOUR OMRON DEVICES ===")
-              for d in devices:
-                  print(f"Device: {d}")
-              print("==========================\n")
-
-          asyncio.run(main())
-          EOF
+          python -c "import omronconnect; print(dir(omronconnect))"
