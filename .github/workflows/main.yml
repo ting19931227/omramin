@@ -19,11 +19,22 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
+      - name: Create config file
+        run: |
+          mkdir -p ~/.config/omramin
+          cat <<EOF > ~/.config/omramin/config.json
+          {
+            "omron": {
+              "email": "${{ secrets.OMRON_EMAIL }}",
+              "password": "${{ secrets.OMRON_PASSWORD }}"
+            },
+            "garmin": {
+              "email": "${{ secrets.GARMIN_EMAIL }}",
+              "password": "${{ secrets.GARMIN_PASSWORD }}"
+            }
+          }
+          EOF
+
       - name: Run sync
-        env:
-          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
-          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
         run: |
           omramin sync
