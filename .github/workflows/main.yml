@@ -16,22 +16,26 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Create config file
+      - name: Fetch Devices from OMRON Cloud
+        env:
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
-          mkdir -p ~/.config/omramin
-          cat <<EOF > ~/.config/omramin/config.json
-          {
-            "omron": {
-              "email": "${{ secrets.OMRON_EMAIL }}",
-              "password": "${{ secrets.OMRON_PASSWORD }}"
-            },
-            "garmin": {
-              "email": "${{ secrets.GARMIN_EMAIL }}",
-              "password": "${{ secrets.GARMIN_PASSWORD }}"
-            }
-          }
-          EOF
+          python - << 'EOF'
+          import os, asyncio
+          from omronconnect import OmronConnectClient
 
-      - name: Get OMRON Devices
-        run: |
-          omramin omron list
+          async def main():
+              email = os.environ['OMRON_EMAIL']
+              password = os.environ['OMRON_PASSWORD']
+              print(f"Connecting to OMRON Cloud for: {email}")
+              client = OmronConnectClient()
+              await client.login(email, password)
+              devices = await client.get_devices()
+              print("\n=== YOUR OMRON DEVICES ===")
+              for d in devices:
+                  print(f"Device: {d}")
+              print("==========================\n")
+
+          asyncio.run(main())
+          EOF
