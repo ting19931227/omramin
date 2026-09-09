@@ -19,14 +19,37 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Check OmronConnect Signature
+      - name: Login and Fetch Devices
+        env:
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
           python - << 'EOF'
-          import inspect
-          from omronconnect import get_omron_connect, OmronConnect, OmronConnect1, OmronConnect2
-          
-          print("get_omron_connect:", inspect.signature(get_omron_connect))
-          print("OmronConnect init:", inspect.signature(OmronConnect.__init__))
-          print("OmronConnect1 init:", inspect.signature(OmronConnect1.__init__))
-          print("OmronConnect2 init:", inspect.signature(OmronConnect2.__init__))
+          import os
+          from omronconnect import try_servers
+
+          email = os.environ['OMRON_EMAIL']
+          password = os.environ['OMRON_PASSWORD']
+
+          # 優先嘗試台灣/亞洲常見區域代碼 (TW, JP, US, DE)
+          client = None
+          for country in ['TW', 'JP', 'US', 'DE']:
+              print(f"Trying country: {country}...")
+              try:
+                  client = try_servers(email, password, country=country)
+                  if client:
+                      print(f"Login success with country: {country}!")
+                      break
+              except Exception as e:
+                  print(f"Failed with {country}: {e}")
+
+          if not client:
+              print("Trying default try_servers without country...")
+              client = try_servers(email, password)
+
+          devices = client.get_devices()
+          print("\n=== FOUND OMRON DEVICES ===")
+          for dev in devices:
+              print(f"Device: {dev}")
+          print("===========================\n")
           EOF
