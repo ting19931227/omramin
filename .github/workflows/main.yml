@@ -19,23 +19,14 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Fetch Devices
-        env:
-          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
-          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+      - name: Check OmronConnect Signature
         run: |
           python - << 'EOF'
-          import os
-          from omronconnect import get_omron_connect
-
-          email = os.environ['OMRON_EMAIL']
-          password = os.environ['OMRON_PASSWORD']
-
-          client = get_omron_connect(email=email, password=password)
-          devices = client.get_devices()
-
-          print("\n=== FOUND OMRON DEVICES ===")
-          for dev in devices:
-              print(dev)
-          print("===========================\n")
+          import inspect
+          from omronconnect import get_omron_connect, OmronConnect, OmronConnect1, OmronConnect2
+          
+          print("get_omron_connect:", inspect.signature(get_omron_connect))
+          print("OmronConnect init:", inspect.signature(OmronConnect.__init__))
+          print("OmronConnect1 init:", inspect.signature(OmronConnect1.__init__))
+          print("OmronConnect2 init:", inspect.signature(OmronConnect2.__init__))
           EOF
