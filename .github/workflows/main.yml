@@ -16,9 +16,25 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Check help and scan
+      - name: Create config file
         run: |
-          echo "=== HELP ==="
-          omramin --help
-          echo "=== DEVICE HELP ==="
-          omramin device --help || true
+          mkdir -p ~/.config/omramin
+          cat <<EOF > ~/.config/omramin/config.json
+          {
+            "omron": {
+              "email": "${{ secrets.OMRON_EMAIL }}",
+              "password": "${{ secrets.OMRON_PASSWORD }}"
+            },
+            "garmin": {
+              "email": "${{ secrets.GARMIN_EMAIL }}",
+              "password": "${{ secrets.GARMIN_PASSWORD }}"
+            }
+          }
+          EOF
+
+      - name: Check add options and try add
+        run: |
+          echo "=== ADD HELP ==="
+          omramin add --help
+          echo "=== TRY ADD ==="
+          omramin add --all || omramin add --auto || omramin add || true
