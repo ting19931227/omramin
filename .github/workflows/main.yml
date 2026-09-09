@@ -7,15 +7,35 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install omramin
+      - name: Install dependencies
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Inspect OmronConnect Module
+      - name: Fetch Devices
+        env:
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
         run: |
-          python -c "import omronconnect; print(dir(omronconnect))"
+          python - << 'EOF'
+          import os
+          from omronconnect import get_omron_connect
+
+          email = os.environ['OMRON_EMAIL']
+          password = os.environ['OMRON_PASSWORD']
+
+          client = get_omron_connect(email=email, password=password)
+          devices = client.get_devices()
+
+          print("\n=== FOUND OMRON DEVICES ===")
+          for dev in devices:
+              print(dev)
+          print("===========================\n")
+          EOF
