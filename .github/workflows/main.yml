@@ -1,10 +1,7 @@
 name: Sync OMRON to Garmin
 
 on:
-  schedule:
-    # 每天早上 8 點（UTC 0:00）自動執行一次
-    - cron: '0 0 * * *'
-  workflow_dispatch: # 允許隨時手動點按鈕執行
+  workflow_dispatch: # 手動點擊執行
 
 jobs:
   sync:
@@ -35,6 +32,6 @@ jobs:
           }
           EOF
 
-      - name: Run sync
+      - name: List OMRON devices
         run: |
-          omramin sync --days 120
+          omramin list-devices || true
