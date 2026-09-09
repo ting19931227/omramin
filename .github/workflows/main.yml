@@ -1,7 +1,7 @@
 name: Sync OMRON to Garmin
 
 on:
-  workflow_dispatch: # 手動點擊執行
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -16,22 +16,9 @@ jobs:
         run: |
           pip install "git+https://github.com/bugficks/omramin.git"
 
-      - name: Create config file
+      - name: Check help and scan
         run: |
-          mkdir -p ~/.config/omramin
-          cat <<EOF > ~/.config/omramin/config.json
-          {
-            "omron": {
-              "email": "${{ secrets.OMRON_EMAIL }}",
-              "password": "${{ secrets.OMRON_PASSWORD }}"
-            },
-            "garmin": {
-              "email": "${{ secrets.GARMIN_EMAIL }}",
-              "password": "${{ secrets.GARMIN_PASSWORD }}"
-            }
-          }
-          EOF
-
-      - name: List OMRON devices
-        run: |
-          omramin list-devices || true
+          echo "=== HELP ==="
+          omramin --help
+          echo "=== DEVICE HELP ==="
+          omramin device --help || true
