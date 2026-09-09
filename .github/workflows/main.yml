@@ -10,9 +10,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Read omronconnect try_servers function
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
         run: |
-          echo "=== try_servers definition ==="
-          grep -n -A 20 "def try_servers" omronconnect.py
-          echo "=== get_devices definition ==="
-          grep -n -A 20 "def get_devices" omronconnect.py || true
+          pip install -e .
+
+      - name: Fetch Devices with OmronClient
+        env:
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+        run: |
+          python - << 'EOF'
+          import os
+          from omronconnect import OmronClient
+
+          email = os.environ['OMRON_EMAIL']
+          password = os.environ['OMRON_PASSWORD']
+
+          # 測試亞洲與常見國家代碼
+          for country in ['TW', 'JP', 'US', 'GB']:
+              print(f"--- Trying country: {country} ---")
+              try:
+                  client = OmronClient(country=country)
+                  client.login(email, password)
+                  devices = client.get_devices()
+                  print(f"SUCCESS with country {country}!")
+                  print("\n=== YOUR OMRON DEVICES ===")
+                  for dev in devices:
+                      print(dev)
+                  print("==========================\n")
+                  break
+              except Exception as e:
+                  print(f"Failed with {country}: {e}")
+          EOF
