@@ -32,8 +32,7 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          import inspect
-          from datetime import datetime
+          from datetime import datetime, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
@@ -43,14 +42,14 @@ jobs:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
-          # 1. 載入 Garmin Token Session
+          # 1. 載入 Garmin Token
           print("1. Loading Garmin session using Token...")
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
           print("Garmin session loaded successfully!")
 
-          # 2. 登入 OMRON Connect (TW)
+          # 2. 登入 OMRON 並以整數日期查詢
           print("\n2. Logging into OMRON Connect (TW)...")
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
@@ -59,20 +58,15 @@ jobs:
           devices = omron.get_registered_devices(days=90)
           print(f"Found {len(devices)} device(s):", [d.name for d in devices])
 
-          # 檢查 get_measurements 確切簽名
-          sig = inspect.signature(omron.get_measurements)
-          print("omron.get_measurements signature:", sig)
+          # 格式化為整數，例如 20260612 至 20260910
+          date_from = int((datetime.now() - timedelta(days=90)).strftime("%Y%m%d"))
+          date_to = int(datetime.now().strftime("%Y%m%d"))
+          print(f"Querying measurements from {date_from} to {date_to}...")
 
           all_records = []
           for dev in devices:
               print(f"\nFetching data for {dev.name} (MAC: {dev.macaddr})...")
-              # 依照無參數調用（預設只傳入 dev）
-              try:
-                  records = omron.get_measurements(dev)
-              except Exception as e:
-                  print(f"get_measurements(dev) failed: {e}")
-                  records = []
-
+              records = omron.get_measurements(dev, searchDateFrom=date_from, searchDateTo=date_to)
               if records:
                   print(f"  -> Found {len(records)} record(s)!")
                   all_records.extend(records)
@@ -81,22 +75,26 @@ jobs:
 
           print(f"\nTotal blood pressure records: {len(all_records)}")
 
-          # 3. 上傳血壓數據至 Garmin Connect
+          # 3. 上傳血壓至 Garmin Connect
           if all_records:
-              print(f"\n3. Uploading to Garmin Connect...")
+              print(f"\n3. Uploading {len(all_records)} record(s) to Garmin Connect...")
               uploaded = 0
               for r in all_records:
                   try:
-                      timestamp = getattr(r, 'timestamp', None) or getattr(r, 'dateTime', None)
+                      # 取得時間戳記
+                      timestamp = getattr(r, 'measure_date', None) or getattr(r, 'timestamp', None) or getattr(r, 'dateTime', None)
                       systolic = getattr(r, 'systolic', None)
                       diastolic = getattr(r, 'diastolic', None)
                       pulse = getattr(r, 'pulse', None) or getattr(r, 'heart_rate', None)
 
                       if isinstance(timestamp, str):
                           timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                      elif isinstance(timestamp, (int, float)):
+                          # 若為毫秒或秒級時間戳
+                          timestamp = datetime.fromtimestamp(timestamp / 1000 if timestamp > 1e11 else timestamp)
 
-                      time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if timestamp else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                      
+                      time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if isinstance(timestamp, datetime) else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                       garmin.set_blood_pressure(
                           systolic=int(systolic),
                           diastolic=int(diastolic),
@@ -106,9 +104,9 @@ jobs:
                       uploaded += 1
                       print(f"  [OK] Synced: {time_str} -> {systolic}/{diastolic} mmHg (HR: {pulse})")
                   except Exception as err:
-                      print(f"  [Skip/Err] {err} - Raw: {r}")
+                      print(f"  [Skip/Err] {err} - Raw attributes: {dir(r)}")
 
               print(f"\nSuccessfully synced {uploaded}/{len(all_records)} record(s) to Garmin Connect!")
           else:
-              print("\nHint: Please ensure your OMRON app has synced latest measurements to the cloud.")
+              print("\nHint: Please verify that the mobile OMRON connect app has synced with your HEM-6232T.")
           EOF
