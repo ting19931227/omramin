@@ -36,17 +36,18 @@ jobs:
           print("OMRON Login successful!")
 
           print("\n=== REGISTERED DEVICES ===")
-          try:
-              devs = client.get_registered_devices()
-              print("Devices:", devs)
-          except Exception as e:
-              print("Failed to get devices:", e)
+          devices = client.get_registered_devices(days=90)
+          print(f"Found {len(devices)} device(s):")
+          for dev in devices:
+              print(f"  Device: {dev}")
 
           print("\n=== RECENT MEASUREMENTS ===")
-          try:
-              data = client.get_measurements()
-              print(f"Total records fetched: {len(data) if isinstance(data, list) else 'N/A'}")
-              print("Sample data:", data[:3] if isinstance(data, list) else data)
-          except Exception as e:
-              print("Failed to get measurements:", e)
+          for dev in devices:
+              try:
+                  data = client.get_measurements(device=dev)
+                  print(f"Device {dev} -> Records fetched: {len(data) if isinstance(data, list) else data}")
+                  if isinstance(data, list) and data:
+                      print(f"Sample: {data[0]}")
+              except Exception as e:
+                  print(f"Failed for device {dev}: {e}")
           EOF
