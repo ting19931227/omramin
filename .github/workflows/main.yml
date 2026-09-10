@@ -19,7 +19,7 @@ jobs:
         run: |
           pip install -e .
 
-      - name: Fetch Devices with OmronClient
+      - name: Verify Login and List Devices
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
@@ -31,18 +31,27 @@ jobs:
           email = os.environ['OMRON_EMAIL']
           password = os.environ['OMRON_PASSWORD']
 
-          # 測試亞洲與常見國家代碼
+          print(f"Connecting to OMRON with: {email}")
+          
+          # 嘗試台灣與亞洲伺服器
           for country in ['TW', 'JP', 'US', 'GB']:
-              print(f"--- Trying country: {country} ---")
+              print(f"\n--- Trying country: {country} ---")
               try:
                   client = OmronClient(country=country)
-                  client.login(email, password)
-                  devices = client.get_devices()
-                  print(f"SUCCESS with country {country}!")
-                  print("\n=== YOUR OMRON DEVICES ===")
-                  for dev in devices:
-                      print(dev)
-                  print("==========================\n")
+                  login_resp = client.login(email, password)
+                  print("Login response:", login_resp)
+                  
+                  # 檢查登入後取得的血壓計設備
+                  print("Inspecting client attributes:")
+                  for attr in ['devices', 'device_list', '_devices']:
+                      if hasattr(client, attr):
+                          print(f"  {attr}: {getattr(client, attr)}")
+                  
+                  if hasattr(client, 'client') and hasattr(client.client, 'get_devices'):
+                      devs = client.client.get_devices()
+                      print("Found devices via inner client:", devs)
+                  
+                  print(f"SUCCESS with {country}!")
                   break
               except Exception as e:
                   print(f"Failed with {country}: {e}")
