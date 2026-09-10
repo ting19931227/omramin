@@ -32,7 +32,8 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          from datetime import datetime, timedelta
+          import copy
+          from datetime import datetime
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
@@ -57,32 +58,23 @@ jobs:
           print(f"Found {len(devices)} device(s)")
 
           all_records = []
-          for dev in devices:
-              print(f"\n--- Device Details: {dev.name} ---")
-              print("Device dict / vars:", getattr(dev, '__dict__', str(dev)))
-
-              # 嘗試格式 A: 14 碼 YYYYMMDDhhmmss (常見於歐姆龍 API 規範)
-              date_from_14 = int((datetime.now() - timedelta(days=90)).strftime("%Y%m%d000000"))
-              date_to_14 = int(datetime.now().strftime("%Y%m%d235959"))
-              print(f"Trying 14-digit format: {date_from_14} ~ {date_to_14}")
-              try:
-                  rec_a = omron.get_measurements(dev, searchDateFrom=date_from_14, searchDateTo=date_to_14)
-                  print(f"  -> Format A returned: {len(rec_a) if rec_a else 0} records")
-                  if rec_a:
-                      all_records.extend(rec_a)
-              except Exception as e:
-                  print(f"  -> Format A error: {e}")
-
-              # 如果 A 沒有，嘗試格式 B: 傳 0, 0 或不帶範圍
-              if not all_records:
-                  print("Trying full query (searchDateFrom=0, searchDateTo=0)...")
+          for base_dev in devices:
+              # 交叉測試 user 1 與 user 2
+              for user_id in [1, 2]:
+                  dev = copy.copy(base_dev)
+                  dev.user = user_id
+                  print(f"\nChecking device {dev.name} for User {user_id}...")
+                  
+                  # 測試 0, 0 全量查詢
                   try:
-                      rec_b = omron.get_measurements(dev, searchDateFrom=0, searchDateTo=0)
-                      print(f"  -> Format B returned: {len(rec_b) if rec_b else 0} records")
-                      if rec_b:
-                          all_records.extend(rec_b)
-                  except Exception as e:
-                      print(f"  -> Format B error: {e}")
+                      records = omron.get_measurements(dev, searchDateFrom=0, searchDateTo=0)
+                      if records:
+                          print(f"  -> User {user_id} matched! Found {len(records)} record(s).")
+                          all_records.extend(records)
+                      else:
+                          print(f"  -> User {user_id}: 0 records returned.")
+                  except Exception as err:
+                      print(f"  -> User {user_id} query error: {err}")
 
           print(f"\nTotal blood pressure records fetched: {len(all_records)}")
 
@@ -117,5 +109,5 @@ jobs:
 
               print(f"\nSuccessfully synced {uploaded}/{len(all_records)} record(s) to Garmin Connect!")
           else:
-              print("\nNo records found. Please check phone app sync status.")
+              print("\nNo records found. Please ensure the phone app shows measurement history under this account.")
           EOF
