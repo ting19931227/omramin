@@ -2,8 +2,6 @@ name: Sync OMRON to Garmin
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動執行
 
 jobs:
   sync:
@@ -21,12 +19,10 @@ jobs:
         run: |
           pip install -e .
 
-      - name: Run Direct Python Sync
+      - name: Fetch Devices and Measurements
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
         run: |
           python - << 'EOF'
           import os
@@ -35,12 +31,22 @@ jobs:
           omron_user = os.environ['OMRON_EMAIL']
           omron_pwd = os.environ['OMRON_PASSWORD']
 
-          print("1. Logging into OMRON Connect (TW)...")
-          omron = OmronClient(country='TW')
-          omron.login(omron_user, omron_pwd)
+          client = OmronClient(country='TW')
+          client.login(omron_user, omron_pwd)
           print("OMRON Login successful!")
 
-          # 列出所有可用的方法與資料
-          methods = [m for m in dir(omron) if not m.startswith('_')]
-          print("Available methods on OmronClient:", methods)
+          print("\n=== REGISTERED DEVICES ===")
+          try:
+              devs = client.get_registered_devices()
+              print("Devices:", devs)
+          except Exception as e:
+              print("Failed to get devices:", e)
+
+          print("\n=== RECENT MEASUREMENTS ===")
+          try:
+              data = client.get_measurements()
+              print(f"Total records fetched: {len(data) if isinstance(data, list) else 'N/A'}")
+              print("Sample data:", data[:3] if isinstance(data, list) else data)
+          except Exception as e:
+              print("Failed to get measurements:", e)
           EOF
