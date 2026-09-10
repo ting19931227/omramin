@@ -2,8 +2,6 @@ name: Sync OMRON to Garmin
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動同步
 
 jobs:
   sync:
@@ -20,49 +18,17 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          # 安裝 keyrings.alt 支援在無 GUI 的 Linux Actions 環境下儲存 token
-          pip install keyrings.alt
 
-      - name: Generate Config and Sync
-        env:
-          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
-          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-          PYTHONUNBUFFERED: "1"
+      - name: Inspect CLI Options and Environment Variables
         run: |
+          echo "=== 1. Main Help ==="
+          omramin --help
+          echo "=== 2. Sync Command Help ==="
+          omramin sync --help
+          echo "=== 3. Login Functions Env Vars ==="
           python - << 'EOF'
-          import json
-          import os
-
-          config_data = {
-              "omron": {
-                  "email": os.environ["OMRON_EMAIL"],
-                  "country": "TW",
-                  "devices": [
-                      {
-                          "name": "HEM-6232T-AP:1",
-                          "macaddr": "b2:ff:fe:c4:e1:3c",
-                          "category": "BPM",
-                          "user": 1,
-                          "enabled": True
-                      }
-                  ]
-              },
-              "garmin": {
-                  "email": os.environ["GARMIN_EMAIL"]
-              }
-          }
-
-          with open("config.json", "w", encoding="utf-8") as f:
-              json.dump(config_data, f, indent=2)
-
-          print("Generated config.json successfully.")
+          with open("omramin.py", "r", encoding="utf-8") as f:
+              for line in f:
+                  if "_E(" in line or "environ" in line:
+                      print(line.strip())
           EOF
-
-          # 直接透過參數傳遞憑證執行同步
-          omramin sync --days 90 \
-            --omron-email "$OMRON_EMAIL" \
-            --omron-password "$OMRON_PASSWORD" \
-            --garmin-email "$GARMIN_EMAIL" \
-            --garmin-password "$GARMIN_PASSWORD"
