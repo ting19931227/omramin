@@ -3,7 +3,7 @@ name: Sync OMRON to Garmin
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * *' # 每天台灣時間 20:00 自動執行
 
 jobs:
   sync:
@@ -32,40 +32,36 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          import json
           import time
-          from datetime import datetime, timezone, timedelta
+          from datetime import datetime, timedelta
           import garth
-          import httpx
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
-          # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
+          # 1. 載入 Garmin 憑證與授權標頭
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
-          print("Garmin session loaded successfully!")
 
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
-          # 為 garmin.client 的 underlying session 補齊 headers
-          headers_extra = {
-              "Authorization": f"Bearer {token_str}",
-              "Origin": "https://connect.garmin.com",
-              "Referer": "https://connect.garmin.com/",
-              "di-backend": "connectapi.garmin.com",
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-          }
           if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
-              garth.client.sess.headers.update(headers_extra)
+              garth.client.sess.headers.update({
+                  "Authorization": f"Bearer {token_str}",
+                  "Origin": "https://connect.garmin.com",
+                  "Referer": "https://connect.garmin.com/",
+                  "di-backend": "connectapi.garmin.com",
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+              })
+          print("Garmin session & Bearer headers configured.")
 
-          # 2. 登入 OMRON 並抓取血壓
+          # 2. 登入 OMRON 並抓取血壓數據
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
@@ -73,7 +69,6 @@ jobs:
           client = omron._active_client
           hx = getattr(client, '_client', None)
           url = f"{client._server}{client._APP_URL}/versions/current/measureData"
-          headers = client._headers
 
           now_ms = int(time.time() * 1000)
           payload = {
@@ -84,23 +79,18 @@ jobs:
               "searchDateTo": now_ms
           }
 
-          resp = hx.post(url, json=payload, headers=headers)
-          resp_json = resp.json()
-
-          raw_records = []
-          val = resp_json.get("returnedValue", {})
+          resp = hx.post(url, json=payload, headers=client._headers)
+          val = resp.json().get("returnedValue", {})
           if isinstance(val, list) and val:
               val = val[0]
 
-          models = val.get("deviceModelList", []) if isinstance(val, dict) else []
-          for m in models:
+          raw_records = []
+          for m in val.get("deviceModelList", []):
               for s in m.get("deviceSerialIDList", []):
                   raw_records.extend(s.get("measureList", []))
 
-          print(f"Total extracted records from OMRON: {len(raw_records)}")
-
-          # 篩選最新資料
-          cutoff_date = datetime.now() - timedelta(days=14)
+          # 篩選最近 7 天內的紀錄
+          cutoff_date = datetime.now() - timedelta(days=7)
           recent_records = []
           for item in raw_records:
               dt_raw = str(item.get("measureDeviceDateFrom") or "")
@@ -110,99 +100,30 @@ jobs:
                       item['_parsed_dt'] = dt_obj
                       recent_records.append(item)
 
-          if not recent_records and raw_records:
-              raw_records.sort(key=lambda x: str(x.get("measureDeviceDateFrom") or 0), reverse=True)
-              latest = raw_records[0]
-              dt_raw = str(latest.get("measureDeviceDateFrom") or "")
-              latest['_parsed_dt'] = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S") if len(dt_raw) >= 14 else datetime.now()
-              recent_records.append(latest)
-
-          print(f"Targeting {len(recent_records)} record(s) for sync.")
-
-          garmin_bp_url = "https://connectapi.garmin.com/bloodpressure-service/bloodpressure"
-          garmin_headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-              "Origin": "https://connect.garmin.com",
-              "Referer": "https://connect.garmin.com/",
-              "di-backend": "connectapi.garmin.com",
-              "Content-Type": "application/json",
-              "Authorization": f"Bearer {token_str}"
-          }
+          # 由舊到新排序
+          recent_records.sort(key=lambda x: x['_parsed_dt'])
+          print(f"Syncing {len(recent_records)} record(s) from the last 7 days...")
 
           uploaded = 0
-          with httpx.Client(timeout=15.0) as g_client:
-              for item in recent_records:
+          for item in recent_records:
+              try:
                   body_indices = item.get("bodyIndexList", {})
                   sys_val = int(body_indices["1"][0])
                   dia_val = int(body_indices["2"][0])
                   pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
-                  dt_local = item['_parsed_dt']
+                  time_str = item['_parsed_dt'].strftime("%Y-%m-%d %H:%M:%S")
 
-                  # 台灣時間轉 UTC
-                  tz_tw = timezone(timedelta(hours=8))
-                  dt_with_tz = dt_local.replace(tzinfo=tz_tw)
-                  dt_utc = dt_with_tz.astimezone(timezone.utc)
-                  
-                  local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
-                  local_iso = dt_local.strftime("%Y-%m-%dT%H:%M:%S")
-                  gmt_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+                  garmin.set_blood_pressure(
+                      systolic=sys_val,
+                      diastolic=dia_val,
+                      pulse=pulse_val,
+                      timestamp=time_str
+                  )
+                  uploaded += 1
+                  print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                  time.sleep(1.2)
+              except Exception as err:
+                  print(f"  [Skip/Err] {err} ({time_str})")
 
-                  # 嘗試三種經過社群驗證的 Garmin 官方規格欄位組合
-                  payload_candidates = [
-                      # 組合 1: 帶 measurementTime / measurementTimeGMT 物件
-                      ("measurementTime Format", {
-                          "measurementTime": local_iso,
-                          "measurementTimeGMT": gmt_iso,
-                          "systolic": sys_val,
-                          "diastolic": dia_val,
-                          "pulse": pulse_val,
-                          "sourceType": "MANUAL"
-                      }),
-                      # 組合 2: 帶 bloodPressureDTO 物件層級
-                      ("bloodPressureDTO Format", {
-                          "bloodPressureDTO": {
-                              "measurementTimestampLocal": local_iso,
-                              "measurementTimestampGMT": gmt_iso,
-                              "systolic": sys_val,
-                              "diastolic": dia_val,
-                              "pulse": pulse_val,
-                              "sourceType": "MANUAL"
-                          }
-                      }),
-                      # 組合 3: 使用原生套件已注入 Bearer 的方法
-                      ("Native SDK Method", None)
-                  ]
-
-                  print(f"\nSyncing: {local_str} -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
-                  success = False
-
-                  for label, p_data in payload_candidates:
-                      try:
-                          if p_data is not None:
-                              r = g_client.post(garmin_bp_url, json=p_data, headers=garmin_headers)
-                              print(f"  [{label}] Status: HTTP {r.status_code}")
-                              if r.status_code in [200, 201, 204]:
-                                  print(f"  [OK] Synced successfully!")
-                                  uploaded += 1
-                                  success = True
-                                  break
-                              else:
-                                  print(f"  [{label}] Response: {r.text[:200]}")
-                          else:
-                              garmin.set_blood_pressure(
-                                  systolic=sys_val,
-                                  diastolic=dia_val,
-                                  pulse=pulse_val,
-                                  timestamp=local_str
-                              )
-                              print(f"  [Native SDK] Successfully uploaded via garmin.set_blood_pressure!")
-                              uploaded += 1
-                              success = True
-                              break
-                      except Exception as ex:
-                          print(f"  [{label}] Error: {ex}")
-
-          print(f"\n==========================================")
-          print(f"Sync complete: {uploaded}/{len(recent_records)} uploaded.")
-          print(f"==========================================")
+          print(f"\nCompleted: Synced {uploaded}/{len(recent_records)} record(s) to Garmin Connect.")
           EOF
