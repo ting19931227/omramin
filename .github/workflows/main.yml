@@ -20,73 +20,87 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install garminconnect
+          pip install garminconnect garth
 
       - name: Direct Sync with Token
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
-          OMRON_COUNTRY: "TW"
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
           import os
           import sys
-          from datetime import datetime
-          from omronconnect import OmronClient
+          from datetime import datetime, timedelta
+          import garth
           from garminconnect import Garmin
+          from omronconnect import OmronClient
 
-          omron_user = os.environ['OMRON_EMAIL']
-          omron_pwd = os.environ['OMRON_PASSWORD']
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
-
           if not garmin_tokens:
-              print("Error: GARMIN_TOKENS secret is missing.")
+              print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
-          # 1. 登入 OMRON 並抓取血壓
-          print("1. Logging into OMRON Connect (TW)...")
+          # 1. 驗證 Garmin Token Session
+          print("1. Loading Garmin session using Token...")
+          garth.loads(garmin_tokens)
+          garmin = Garmin(is_cn=False)
+          garmin.client = garth.client
+          print(f"Garmin session loaded successfully! Logged in as: {garth.client.username or 'Authenticated User'}")
+
+          # 2. 登入 OMRON Connect (TW)
+          print("\n2. Logging into OMRON Connect (TW)...")
           omron = OmronClient(country='TW')
-          omron.login(omron_user, omron_pwd)
+          omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
-          devices = omron.get_registered_devices(days=90)
+          devices = omron.get_registered_devices()
           print(f"Found {len(devices)} device(s):", [d.name for d in devices])
+
+          # 設定日期範圍：過去 90 天到今天
+          start_date = datetime.now() - timedelta(days=90)
+          end_date = datetime.now()
 
           all_records = []
           for dev in devices:
-              try:
-                  records = omron.get_measurements(dev, days=90)
-              except TypeError:
-                  records = omron.get_measurements(dev)
-              if records:
-                  all_records.extend(records)
+              print(f"\nFetching data for {dev.name} (MAC: {dev.macaddr})...")
+              # 嘗試不同的參數組合調用
+              fetched = None
+              for try_call in [
+                  lambda: omron.get_measurements(dev, start_date=start_date, end_date=end_date),
+                  lambda: omron.get_measurements(dev, days=90),
+                  lambda: omron.get_measurements(dev)
+              ]:
+                  try:
+                      fetched = try_call()
+                      if fetched:
+                          break
+                  except Exception as e:
+                      pass
 
-          print(f"Total blood pressure records fetched from OMRON: {len(all_records)}")
+              if fetched:
+                  print(f"  -> Found {len(fetched)} record(s)!")
+                  all_records.extend(fetched)
+              else:
+                  print(f"  -> No records returned for {dev.name}.")
 
-          # 2. 透過 Token 載入 Garmin (免除密碼登入與 Cloudflare 阻擋)
-          print("\n2. Loading Garmin session using Token...")
-          garmin = Garmin(is_cn=False)
-          garmin.garth.loads(garmin_tokens)
-          print("Garmin session loaded successfully!")
+          print(f"\nTotal blood pressure records: {len(all_records)}")
 
-          # 3. 上傳血壓數據
+          # 3. 上傳血壓數據至 Garmin Connect
           if all_records:
-              print(f"\n3. Uploading {len(all_records)} record(s) to Garmin Connect...")
+              print(f"\n3. Uploading to Garmin Connect...")
               uploaded = 0
               for r in all_records:
                   try:
-                      # omronconnect 記錄格式通常包含 systolic, diastolic, pulse, timestamp
-                      # Garmin set_blood_pressure 支援 (systolic, diastolic, pulse, timestamp)
+                      # 取得時間與血壓數據
                       timestamp = getattr(r, 'timestamp', None) or getattr(r, 'dateTime', None)
                       systolic = getattr(r, 'systolic', None)
                       diastolic = getattr(r, 'diastolic', None)
                       pulse = getattr(r, 'pulse', None) or getattr(r, 'heart_rate', None)
 
                       if isinstance(timestamp, str):
-                          timestamp = datetime.fromisoformat(timestamp)
+                          timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
                       time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if timestamp else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                       
@@ -99,9 +113,9 @@ jobs:
                       uploaded += 1
                       print(f"  [OK] Synced: {time_str} -> {systolic}/{diastolic} mmHg (HR: {pulse})")
                   except Exception as err:
-                      print(f"  [Skip/Err] {err} - Data: {r}")
+                      print(f"  [Skip/Err] {err} - Raw: {r}")
 
-              print(f"\nCompleted! {uploaded}/{len(all_records)} record(s) synced to Garmin Connect.")
+              print(f"\nSuccessfully synced {uploaded}/{len(all_records)} record(s) to Garmin Connect!")
           else:
-              print("No records to sync. (Make sure you refreshed the OMRON connect mobile app)")
+              print("\nHint: Please open the OMRON connect mobile app and pull down to refresh to ensure data is synced to cloud.")
           EOF
