@@ -32,7 +32,7 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          from datetime import datetime, timedelta
+          from datetime import datetime
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
@@ -42,7 +42,7 @@ jobs:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
-          # 1. 驗證 Garmin Token Session
+          # 1. 載入 Garmin Token Session
           print("1. Loading Garmin session using Token...")
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
@@ -55,32 +55,17 @@ jobs:
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
-          devices = omron.get_registered_devices()
+          # 傳入必填參數 days
+          devices = omron.get_registered_devices(days=90)
           print(f"Found {len(devices)} device(s):", [d.name for d in devices])
-
-          # 設定日期範圍：過去 90 天到今天
-          start_date = datetime.now() - timedelta(days=90)
-          end_date = datetime.now()
 
           all_records = []
           for dev in devices:
               print(f"\nFetching data for {dev.name} (MAC: {dev.macaddr})...")
-              fetched = None
-              for try_call in [
-                  lambda: omron.get_measurements(dev, start_date=start_date, end_date=end_date),
-                  lambda: omron.get_measurements(dev, days=90),
-                  lambda: omron.get_measurements(dev)
-              ]:
-                  try:
-                      fetched = try_call()
-                      if fetched:
-                          break
-                  except Exception:
-                      pass
-
-              if fetched:
-                  print(f"  -> Found {len(fetched)} record(s)!")
-                  all_records.extend(fetched)
+              records = omron.get_measurements(dev, days=90)
+              if records:
+                  print(f"  -> Found {len(records)} record(s)!")
+                  all_records.extend(records)
               else:
                   print(f"  -> No records returned for {dev.name}.")
 
