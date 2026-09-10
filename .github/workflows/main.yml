@@ -3,7 +3,7 @@ name: Sync OMRON to Garmin
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動同步
 
 jobs:
   sync:
@@ -41,125 +41,93 @@ jobs:
 
           # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
+          if not garmin_tokens:
+              print("Error: GARMIN_TOKENS is missing.")
+              sys.exit(1)
+
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
           print("Garmin session loaded successfully!")
 
-          # 2. 登入 OMRON
+          # 2. 登入 OMRON 並以 Minimal Payload 取得 measureList
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
           client = omron._active_client
           hx = getattr(client, '_client', None)
-
-          devs = omron.get_registered_devices(days=90)
-          dev = devs[0]
-          print(f"\nTarget device vars: {getattr(dev, '__dict__', str(dev))}")
-
-          # 正確的 API 完整端點
           url = f"{client._server}{client._APP_URL}/versions/current/measureData"
           headers = client._headers
+
           now_ms = int(time.time() * 1000)
+          payload = {
+              "containCorrectedDataFlag": 1,
+              "containAllDataTypeFlag": 1,
+              "deviceCategory": "0",
+              "searchDateFrom": 0,
+              "searchDateTo": now_ms
+          }
 
-          # 測試不同的 serial / user 組合
-          serial_val = getattr(dev, 'serial', None) or dev.macaddr
-          category_val = dev.category.value if hasattr(dev.category, 'value') else str(dev.category)
-
-          payload_candidates = [
-              # 組合 A: 官方代碼完整結構 (帶 serial)
-              ("Standard with Serial", {
-                  "containCorrectedDataFlag": 1,
-                  "containAllDataTypeFlag": 1,
-                  "deviceCategory": category_val,
-                  "deviceSerialID": str(serial_val),
-                  "userNumberInDevice": int(dev.user),
-                  "searchDateFrom": 0,
-                  "searchDateTo": now_ms
-              }),
-              # 組合 B: 不帶 serialID (帳號級血壓查詢)
-              ("Without SerialID", {
-                  "containCorrectedDataFlag": 1,
-                  "containAllDataTypeFlag": 1,
-                  "deviceCategory": category_val,
-                  "userNumberInDevice": int(dev.user),
-                  "searchDateFrom": 0,
-                  "searchDateTo": now_ms
-              }),
-              # 組合 C: 不帶 userNumber (廣域查詢)
-              ("Without userNumber", {
-                  "containCorrectedDataFlag": 1,
-                  "containAllDataTypeFlag": 1,
-                  "deviceCategory": category_val,
-                  "searchDateFrom": 0,
-                  "searchDateTo": now_ms
-              }),
-              # 組合 D: 最小必要參數
-              ("Minimal Payload", {
-                  "deviceCategory": category_val,
-                  "searchDateFrom": 0,
-                  "searchDateTo": now_ms
-              })
-          ]
+          resp = hx.post(url, json=payload, headers=headers)
+          resp_json = resp.json()
 
           raw_records = []
-          for name, p in payload_candidates:
-              print(f"\nTesting: {name}")
-              try:
-                  res = hx.post(url, json=p, headers=headers)
-                  print(f"HTTP Status: {res.status_code}")
-                  res_json = res.json()
-                  print("Response body preview:", json.dumps(res_json, ensure_ascii=False)[:300])
+          val = resp_json.get("returnedValue", {})
+          if isinstance(val, list) and val:
+              val = val[0]
 
-                  val = res_json.get("returnedValue", {})
-                  if isinstance(val, list) and val:
-                      val = val[0]
+          models = val.get("deviceModelList", []) if isinstance(val, dict) else []
+          print(f"Found {len(models)} deviceModel block(s).")
 
-                  models = val.get("deviceModelList") if isinstance(val, dict) else None
-                  if models:
-                      print(f"  ===> SUCCESS! Found {len(models)} model group(s) via [{name}]!")
-                      for m in models:
-                          for u in m.get("userDataList", []):
-                              for item in u.get("measurementDataList", []):
-                                  raw_records.append(item)
-                      if raw_records:
-                          break
-              except Exception as err:
-                  print(f"Error testing {name}: {err}")
+          for m in models:
+              for s in m.get("deviceSerialIDList", []):
+                  user_num = s.get("userNumberInDevice", 1)
+                  measures = s.get("measureList", [])
+                  print(f"Device: {m.get('deviceModel')} (User {user_num}) -> {len(measures)} measure(s)")
+                  raw_records.extend(measures)
 
-          print(f"\nExtracted total blood pressure records: {len(raw_records)}")
+          print(f"\nTotal extracted measure items: {len(raw_records)}")
 
-          # 3. 上傳至 Garmin Connect
+          # 印出第一筆資料的真實鍵值，方便除錯
+          if raw_records:
+              print("\nSample item structure:")
+              print(json.dumps(raw_records[0], ensure_ascii=False, indent=2))
+
+          # 3. 解析並上傳至 Garmin Connect
           if raw_records:
               print(f"\n3. Uploading {len(raw_records)} record(s) to Garmin Connect...")
               uploaded = 0
               for item in raw_records:
                   try:
-                      # 歐姆龍欄位解析 (通常為 measurementDate, sys, dia, pulse)
-                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime") or item.get("measureDateTime"))
-                      sys_val = item.get("sys") or item.get("systolic")
-                      dia_val = item.get("dia") or item.get("diastolic")
-                      pulse_val = item.get("pulse") or item.get("heartRate")
-
-                      if len(dt_raw) >= 14:
-                          dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
-                          time_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+                      # 提取時間戳 (毫秒轉 datetime)
+                      ts_ms = item.get("measureDateFrom") or item.get("measureDate") or item.get("transferDate")
+                      if ts_ms and isinstance(ts_ms, (int, float)):
+                          dt = datetime.fromtimestamp(ts_ms / 1000.0)
+                          time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                       else:
                           time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                      garmin.set_blood_pressure(
-                          systolic=int(sys_val),
-                          diastolic=int(dia_val),
-                          pulse=int(pulse_val) if pulse_val else None,
-                          timestamp=time_str
-                      )
-                      uploaded += 1
-                      print(f"  [OK] Synced to Garmin: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                      # 提取收縮壓、舒張壓、心率 (涵蓋常見命名)
+                      sys_val = item.get("maxBloodPressure") or item.get("systolic") or item.get("sys")
+                      dia_val = item.get("minBloodPressure") or item.get("diastolic") or item.get("dia")
+                      pulse_val = item.get("pulseRate") or item.get("pulse") or item.get("heartRate")
+
+                      if sys_val is not None and dia_val is not None:
+                          garmin.set_blood_pressure(
+                              systolic=int(sys_val),
+                              diastolic=int(dia_val),
+                              pulse=int(pulse_val) if pulse_val else None,
+                              timestamp=time_str
+                          )
+                          uploaded += 1
+                          print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                      else:
+                          print(f"  [Skip] Missing BP values in item: {item}")
                   except Exception as ex:
-                      print(f"  [Skip/Err] {ex} - Raw: {item}")
+                      print(f"  [Err] {ex} - Item: {item}")
 
               print(f"\nSuccessfully synced {uploaded}/{len(raw_records)} record(s) to Garmin Connect!")
           else:
-              print("\nNo records extracted.")
+              print("\nNo measures found to sync.")
           EOF
