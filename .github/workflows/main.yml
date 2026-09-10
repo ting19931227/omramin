@@ -55,19 +55,19 @@ jobs:
 
           now = datetime.now()
           d_from = int((now - timedelta(days=90)).strftime("%Y%m%d000000"))
-          d_to = int(now.strftime("%Y%m%d235959"))
+          d_to = int((now + timedelta(days=1)).strftime("%Y%m%d235959"))
 
-          # 測試不同的 API Payload 組合直接向伺服器調用
-          url = f"{client._APP_URL}/measureData"
+          # 使用完整的 OMRON API 端點
+          url = "https://data-jp.omronconnect.com/api/apps/1e3ddd17/server-code/versions/current/measureData"
           headers = client._headers
 
           print(f"\nQuerying OMRON cloud from {d_from} to {d_to}...")
 
-          # 組合 1: 僅以分類 0 (血壓) + 14碼時間查詢 (不綁 deviceModel，避免型號名稱不匹配)
           payloads = [
               {"name": "No-Model Filter (14-digit)", "data": {"deviceCategory": "0", "searchDateFrom": d_from, "searchDateTo": d_to}},
               {"name": "No-Model Filter (0, 0)", "data": {"deviceCategory": "0", "searchDateFrom": 0, "searchDateTo": 0}},
-              {"name": "With Model List (HEM-6232T)", "data": {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T"}], "searchDateFrom": 0, "searchDateTo": 0}}
+              {"name": "With Model List (HEM-6232T)", "data": {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T"}], "searchDateFrom": 0, "searchDateTo": 0}},
+              {"name": "With Model List (HEM-6232T-AP)", "data": {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T-AP"}], "searchDateFrom": 0, "searchDateTo": 0}}
           ]
 
           raw_records = []
@@ -77,13 +77,12 @@ jobs:
                   resp = hx.post(url, json=p['data'], headers=headers)
                   print(f"Status: {resp.status_code}")
                   res_json = resp.json()
-                  print("Response preview:", json.dumps(res_json, ensure_ascii=False)[:300])
+                  print("Response body preview:", json.dumps(res_json, ensure_ascii=False)[:300])
 
                   returned = res_json.get("returnedValue", {})
                   model_list = returned.get("deviceModelList")
                   if model_list:
                       print(f"  ==> SUCCESS! Found data in deviceModelList!")
-                      # 解析回傳的量測資料
                       for m in model_list:
                           for user in m.get("userDataList", []):
                               for item in user.get("measurementDataList", []):
@@ -101,13 +100,11 @@ jobs:
               uploaded = 0
               for item in raw_records:
                   try:
-                      # 歐姆龍 JSON 典型欄位：measureDate, sys, dia, pulse
-                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime"))
+                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime") or item.get("measureDateTime"))
                       sys_val = item.get("sys") or item.get("systolic")
                       dia_val = item.get("dia") or item.get("diastolic")
                       pulse_val = item.get("pulse") or item.get("heartRate")
 
-                      # 解析 YYYYMMDDhhmmss
                       if len(dt_raw) >= 14:
                           dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
                           time_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
