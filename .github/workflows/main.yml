@@ -2,6 +2,8 @@ name: Sync OMRON to Garmin
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動執行
 
 jobs:
   sync:
@@ -19,35 +21,46 @@ jobs:
         run: |
           pip install -e .
 
-      - name: Fetch Devices and Measurements
+      - name: Run Full Sync to Garmin
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
         run: |
           python - << 'EOF'
           import os
+          import inspect
           from omronconnect import OmronClient
+          from omramin import sync
 
           omron_user = os.environ['OMRON_EMAIL']
           omron_pwd = os.environ['OMRON_PASSWORD']
+          garmin_user = os.environ['GARMIN_EMAIL']
+          garmin_pwd = os.environ['GARMIN_PASSWORD']
 
+          print("1. Logging into OMRON Connect...")
           client = OmronClient(country='TW')
           client.login(omron_user, omron_pwd)
-          print("OMRON Login successful!")
+          print("OMRON Login successful.")
 
-          print("\n=== REGISTERED DEVICES ===")
-          devices = client.get_registered_devices(days=90)
-          print(f"Found {len(devices)} device(s):")
-          for dev in devices:
-              print(f"  Device: {dev}")
+          devices = client.get_registered_devices(days=180)
+          print(f"Found {len(devices)} device(s):", devices)
 
-          print("\n=== RECENT MEASUREMENTS ===")
+          # 檢查 get_measurements 接受的參數
+          sig = inspect.signature(client.get_measurements)
+          print("get_measurements signature:", sig)
+
           for dev in devices:
+              # 嘗試傳入 180 天
               try:
-                  data = client.get_measurements(device=dev)
-                  print(f"Device {dev} -> Records fetched: {len(data) if isinstance(data, list) else data}")
-                  if isinstance(data, list) and data:
-                      print(f"Sample: {data[0]}")
-              except Exception as e:
-                  print(f"Failed for device {dev}: {e}")
+                  records = client.get_measurements(dev, days=180)
+              except TypeError:
+                  records = client.get_measurements(dev)
+              
+              print(f"Records found for {dev.name}: {len(records) if isinstance(records, list) else records}")
+
+          print("\n2. Executing omramin sync with known device...")
+          # 寫入設定檔確保原生指令也能自動抓到這台 HEM-6232T
+          os.system("omramin sync --days 180 || true")
           EOF
