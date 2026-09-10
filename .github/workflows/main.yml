@@ -36,19 +36,24 @@ jobs:
           import time
           from datetime import datetime, timezone, timedelta
           import garth
-          from garminconnect import Garmin
+          import httpx
           from omronconnect import OmronClient
 
-          # 1. 載入 Garmin Token
+          # 1. 載入 Garmin Token Session
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
           garth.client.loads(garmin_tokens)
-          garmin = Garmin(is_cn=False)
-          garmin.client = garth.client
           print("Garmin session loaded successfully!")
+
+          # 檢查 OAuth2 Token 狀態
+          oauth2 = getattr(garth.client, "oauth2_token", None)
+          token_str = None
+          if oauth2:
+              token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
+          print(f"OAuth2 Bearer Token available: {'Yes' if token_str else 'No'}")
 
           # 2. 登入 OMRON 並抓取血壓
           omron = OmronClient(country='TW')
@@ -84,7 +89,7 @@ jobs:
 
           print(f"Total extracted records from OMRON: {len(raw_records)}")
 
-          # 篩選最新資料 (最近 14 天)
+          # 篩選最新 14 天內紀錄
           cutoff_date = datetime.now() - timedelta(days=14)
           recent_records = []
           for item in raw_records:
@@ -104,54 +109,59 @@ jobs:
 
           print(f"Targeting {len(recent_records)} record(s) for sync.")
 
-          # 3. 寫入 Garmin Connect
-          for item in recent_records:
-              body_indices = item.get("bodyIndexList", {})
-              sys_val = int(body_indices["1"][0])
-              dia_val = int(body_indices["2"][0])
-              pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
-              dt_local = item['_parsed_dt']
+          # 3. 寫入 Garmin Connect (直接帶完整 Bearer 標頭發送)
+          garmin_bp_url = "https://connectapi.garmin.com/bloodpressure-service/bloodpressure"
 
-              # 轉換為 UTC ISO 8601 字串 (台灣時區 UTC+8)
-              tz_tw = timezone(timedelta(hours=8))
-              dt_with_tz = dt_local.replace(tzinfo=tz_tw)
-              dt_utc = dt_with_tz.astimezone(timezone.utc)
-              iso_utc_str = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-              local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+          # 建立專用 Headers
+          garmin_headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Origin": "https://connect.garmin.com",
+              "Referer": "https://connect.garmin.com/",
+              "di-backend": "connectapi.garmin.com",
+              "Content-Type": "application/json"
+          }
+          if token_str:
+              garmin_headers["Authorization"] = f"Bearer {token_str}"
 
-              print(f"\nAttempting sync: {local_str} (UTC: {iso_utc_str}) -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
+          uploaded = 0
+          with httpx.Client(timeout=15.0) as g_client:
+              for item in recent_records:
+                  body_indices = item.get("bodyIndexList", {})
+                  sys_val = int(body_indices["1"][0])
+                  dia_val = int(body_indices["2"][0])
+                  pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
+                  dt_local = item['_parsed_dt']
 
-              # 嘗試方法 1: 直接透過 garth.client.post 打底層 API
-              url_bp = "https://connectapi.garmin.com/bloodpressure-service/bloodpressure"
-              bp_payload = {
-                  "measurementTimestampLocal": local_str.replace(" ", "T"),
-                  "measurementTimestampGMT": iso_utc_str,
-                  "systolic": sys_val,
-                  "diastolic": dia_val,
-                  "pulse": pulse_val,
-                  "sourceType": "MANUAL"
-              }
+                  # 台灣時間 UTC+8 轉 UTC
+                  tz_tw = timezone(timedelta(hours=8))
+                  dt_with_tz = dt_local.replace(tzinfo=tz_tw)
+                  dt_utc = dt_with_tz.astimezone(timezone.utc)
+                  iso_utc_str = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                  local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
 
-              success = False
-              try:
-                  res = garth.client.post("connectapi", "bloodpressure-service/bloodpressure", json=bp_payload)
-                  print(f"  [Direct garth] Status: {getattr(res, 'status_code', 'OK')} -> Uploaded successfully!")
-                  success = True
-              except Exception as err1:
-                  print(f"  [Direct garth failed]: {err1}")
+                  bp_payload = {
+                      "measurementTimestampLocal": local_str.replace(" ", "T"),
+                      "measurementTimestampGMT": iso_utc_str,
+                      "systolic": sys_val,
+                      "diastolic": dia_val,
+                      "pulse": pulse_val,
+                      "sourceType": "MANUAL"
+                  }
 
-              # 嘗試方法 2: garmin.set_blood_pressure
-              if not success:
+                  print(f"\nPosting to Garmin: {local_str} -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
+
                   try:
-                      garmin.set_blood_pressure(
-                          systolic=sys_val,
-                          diastolic=dia_val,
-                          pulse=pulse_val,
-                          timestamp=local_str
-                      )
-                      print(f"  [garmin.set_blood_pressure] Uploaded successfully!")
-                      success = True
-                  except Exception as err2:
-                      print(f"  [garmin.set_blood_pressure failed]: {err2}")
+                      r = g_client.post(garmin_bp_url, json=bp_payload, headers=garmin_headers)
+                      print(f"  Response Status: HTTP {r.status_code}")
+                      if r.status_code in [200, 201, 204]:
+                          print(f"  [OK] Synced successfully to Garmin Connect!")
+                          uploaded += 1
+                      else:
+                          print(f"  [Failed] Body: {r.text}")
+                  except Exception as ex:
+                      print(f"  [Error] {ex}")
 
+          print(f"\n==========================================")
+          print(f"Sync complete: {uploaded}/{len(recent_records)} uploaded.")
+          print(f"==========================================")
           EOF
