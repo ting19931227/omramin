@@ -39,7 +39,7 @@ jobs:
           import httpx
           from omronconnect import OmronClient
 
-          # 1. 載入 Garmin Token Session
+          # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
@@ -48,12 +48,8 @@ jobs:
           garth.client.loads(garmin_tokens)
           print("Garmin session loaded successfully!")
 
-          # 檢查 OAuth2 Token 狀態
           oauth2 = getattr(garth.client, "oauth2_token", None)
-          token_str = None
-          if oauth2:
-              token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
-          print(f"OAuth2 Bearer Token available: {'Yes' if token_str else 'No'}")
+          token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
           # 2. 登入 OMRON 並抓取血壓
           omron = OmronClient(country='TW')
@@ -109,19 +105,15 @@ jobs:
 
           print(f"Targeting {len(recent_records)} record(s) for sync.")
 
-          # 3. 寫入 Garmin Connect (直接帶完整 Bearer 標頭發送)
           garmin_bp_url = "https://connectapi.garmin.com/bloodpressure-service/bloodpressure"
-
-          # 建立專用 Headers
           garmin_headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
               "Origin": "https://connect.garmin.com",
               "Referer": "https://connect.garmin.com/",
               "di-backend": "connectapi.garmin.com",
-              "Content-Type": "application/json"
+              "Content-Type": "application/json",
+              "Authorization": f"Bearer {token_str}"
           }
-          if token_str:
-              garmin_headers["Authorization"] = f"Bearer {token_str}"
 
           uploaded = 0
           with httpx.Client(timeout=15.0) as g_client:
@@ -132,34 +124,52 @@ jobs:
                   pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
                   dt_local = item['_parsed_dt']
 
-                  # 台灣時間 UTC+8 轉 UTC
+                  # 台灣時間轉 UTC
                   tz_tw = timezone(timedelta(hours=8))
                   dt_with_tz = dt_local.replace(tzinfo=tz_tw)
                   dt_utc = dt_with_tz.astimezone(timezone.utc)
-                  iso_utc_str = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                  local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
 
-                  bp_payload = {
-                      "measurementTimestampLocal": local_str.replace(" ", "T"),
-                      "measurementTimestampGMT": iso_utc_str,
-                      "systolic": sys_val,
-                      "diastolic": dia_val,
-                      "pulse": pulse_val,
-                      "sourceType": "MANUAL"
-                  }
+                  # 測試兩種 Garmin 官方規格的寫入 Payload 格式
+                  payload_candidates = [
+                      # 格式 A: 陣列包裝 (Garmin Connect Web 批次寫入規格)
+                      [
+                          {
+                              "measurementTimestampLocal": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
+                              "measurementTimestampGMT": dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              "systolic": sys_val,
+                              "diastolic": dia_val,
+                              "pulse": pulse_val,
+                              "sourceType": "MANUAL"
+                          }
+                      ],
+                      # 格式 B: 物件包裝 (不帶毫秒的标准時間戳)
+                      {
+                          "measurementTimestampLocal": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
+                          "measurementTimestampGMT": dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                          "systolic": sys_val,
+                          "diastolic": dia_val,
+                          "pulse": pulse_val,
+                          "sourceType": "MANUAL"
+                      }
+                  ]
 
-                  print(f"\nPosting to Garmin: {local_str} -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
+                  time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                  print(f"\nPosting: {time_str} -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
 
-                  try:
-                      r = g_client.post(garmin_bp_url, json=bp_payload, headers=garmin_headers)
-                      print(f"  Response Status: HTTP {r.status_code}")
-                      if r.status_code in [200, 201, 204]:
-                          print(f"  [OK] Synced successfully to Garmin Connect!")
-                          uploaded += 1
-                      else:
-                          print(f"  [Failed] Body: {r.text}")
-                  except Exception as ex:
-                      print(f"  [Error] {ex}")
+                  success = False
+                  for idx, bp_payload in enumerate(payload_candidates, 1):
+                      try:
+                          r = g_client.post(garmin_bp_url, json=bp_payload, headers=garmin_headers)
+                          print(f"  Attempt {idx} Status: HTTP {r.status_code}")
+                          if r.status_code in [200, 201, 204]:
+                              print(f"  [OK] Synced successfully to Garmin Connect!")
+                              uploaded += 1
+                              success = True
+                              break
+                          else:
+                              print(f"  Attempt {idx} Response: {r.text}")
+                      except Exception as ex:
+                          print(f"  Attempt {idx} Error: {ex}")
 
           print(f"\n==========================================")
           print(f"Sync complete: {uploaded}/{len(recent_records)} uploaded.")
