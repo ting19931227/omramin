@@ -33,85 +33,111 @@ jobs:
           import os
           import sys
           import json
-          import inspect
-          from datetime import datetime, timedelta
+          import time
+          from datetime import datetime
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
+          # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
           print("Garmin session loaded successfully!")
 
+          # 2. 登入 OMRON
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
           client = omron._active_client
-          print("\n=== omronconnect get_measurements Source Code ===")
-          try:
-              print(inspect.getsource(client.get_measurements))
-          except Exception as e:
-              print("Cannot inspect source:", e)
+          hx = getattr(client, '_client', None)
 
           devs = omron.get_registered_devices(days=90)
           dev = devs[0]
-          print(f"\nTarget device: {dev}")
+          print(f"\nTarget device vars: {getattr(dev, '__dict__', str(dev))}")
 
-          hx = getattr(client, '_client', None)
-          url = f"{client._server}{client._APP_URL}/measureData"
-          print(f"API Target Endpoint: {url}")
+          # 正確的 API 完整端點
+          url = f"{client._server}{client._APP_URL}/versions/current/measureData"
+          headers = client._headers
+          now_ms = int(time.time() * 1000)
 
-          # 測試多種常見的 OMRON measureData 參數組合
-          test_cases = [
-              # 組合 1: 帶入 deviceModelList 且指定 deviceModel 為空或特定型號
-              ("Model with AP", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T-AP"}]}),
-              ("Model with base", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T"}]}),
-              ("Model with user", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T", "user": 1}]}),
-              ("Model empty string", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": ""}]}),
-              # 組合 2: 傳入字串型態的日期與數值
-              ("Date range (YYYYMMDD)", {"deviceCategory": "0", "searchDateFrom": 20260101, "searchDateTo": 20261231}),
-              ("Date range 14-digit", {"deviceCategory": "0", "searchDateFrom": 20260101000000, "searchDateTo": 20261231235959}),
-              # 組合 3: 帶入使用者 ID
-              ("With user 1", {"deviceCategory": "0", "user": 1}),
-              ("With user '1'", {"deviceCategory": "0", "user": "1"}),
-              # 組合 4: 完全無過濾
-              ("Empty payload", {}),
-              ("Category only", {"deviceCategory": "0"}),
+          # 測試不同的 serial / user 組合
+          serial_val = getattr(dev, 'serial', None) or dev.macaddr
+          category_val = dev.category.value if hasattr(dev.category, 'value') else str(dev.category)
+
+          payload_candidates = [
+              # 組合 A: 官方代碼完整結構 (帶 serial)
+              ("Standard with Serial", {
+                  "containCorrectedDataFlag": 1,
+                  "containAllDataTypeFlag": 1,
+                  "deviceCategory": category_val,
+                  "deviceSerialID": str(serial_val),
+                  "userNumberInDevice": int(dev.user),
+                  "searchDateFrom": 0,
+                  "searchDateTo": now_ms
+              }),
+              # 組合 B: 不帶 serialID (帳號級血壓查詢)
+              ("Without SerialID", {
+                  "containCorrectedDataFlag": 1,
+                  "containAllDataTypeFlag": 1,
+                  "deviceCategory": category_val,
+                  "userNumberInDevice": int(dev.user),
+                  "searchDateFrom": 0,
+                  "searchDateTo": now_ms
+              }),
+              # 組合 C: 不帶 userNumber (廣域查詢)
+              ("Without userNumber", {
+                  "containCorrectedDataFlag": 1,
+                  "containAllDataTypeFlag": 1,
+                  "deviceCategory": category_val,
+                  "searchDateFrom": 0,
+                  "searchDateTo": now_ms
+              }),
+              # 組合 D: 最小必要參數
+              ("Minimal Payload", {
+                  "deviceCategory": category_val,
+                  "searchDateFrom": 0,
+                  "searchDateTo": now_ms
+              })
           ]
 
-          successful_records = []
-          for name, payload in test_cases:
+          raw_records = []
+          for name, p in payload_candidates:
+              print(f"\nTesting: {name}")
               try:
-                  res = hx.post(url, json=payload, headers=client._headers)
-                  data = res.json()
-                  val = data.get("returnedValue", {})
-                  models = val.get("deviceModelList")
+                  res = hx.post(url, json=p, headers=headers)
+                  print(f"HTTP Status: {res.status_code}")
+                  res_json = res.json()
+                  print("Response body preview:", json.dumps(res_json, ensure_ascii=False)[:300])
+
+                  val = res_json.get("returnedValue", {})
+                  if isinstance(val, list) and val:
+                      val = val[0]
+
+                  models = val.get("deviceModelList") if isinstance(val, dict) else None
                   if models:
-                      print(f"\n[HIT SUCCESS!] Test case '{name}' returned data!")
-                      print(json.dumps(val, ensure_ascii=False)[:500])
-                      # 擷取測量數值
+                      print(f"  ===> SUCCESS! Found {len(models)} model group(s) via [{name}]!")
                       for m in models:
                           for u in m.get("userDataList", []):
                               for item in u.get("measurementDataList", []):
-                                  successful_records.append(item)
-                      break
-                  else:
-                      print(f"Test case '{name}': null response")
+                                  raw_records.append(item)
+                      if raw_records:
+                          break
               except Exception as err:
-                  print(f"Test case '{name}' error: {err}")
+                  print(f"Error testing {name}: {err}")
 
-          print(f"\nExtracted total records: {len(successful_records)}")
+          print(f"\nExtracted total blood pressure records: {len(raw_records)}")
 
-          # 若成功抓出資料，直接寫入 Garmin
-          if successful_records:
-              print("\nUploading to Garmin Connect...")
+          # 3. 上傳至 Garmin Connect
+          if raw_records:
+              print(f"\n3. Uploading {len(raw_records)} record(s) to Garmin Connect...")
               uploaded = 0
-              for item in successful_records:
+              for item in raw_records:
                   try:
-                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime"))
+                      # 歐姆龍欄位解析 (通常為 measurementDate, sys, dia, pulse)
+                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime") or item.get("measureDateTime"))
                       sys_val = item.get("sys") or item.get("systolic")
                       dia_val = item.get("dia") or item.get("diastolic")
                       pulse_val = item.get("pulse") or item.get("heartRate")
@@ -129,9 +155,11 @@ jobs:
                           timestamp=time_str
                       )
                       uploaded += 1
-                      print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
-                  except Exception as e:
-                      print(f"  [Skip/Err] {e}")
+                      print(f"  [OK] Synced to Garmin: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                  except Exception as ex:
+                      print(f"  [Skip/Err] {ex} - Raw: {item}")
 
-              print(f"\nSuccessfully synced {uploaded} record(s) to Garmin Connect!")
+              print(f"\nSuccessfully synced {uploaded}/{len(raw_records)} record(s) to Garmin Connect!")
+          else:
+              print("\nNo records extracted.")
           EOF
