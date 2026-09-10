@@ -53,26 +53,43 @@ jobs:
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
+          # 檢查帳號資訊
+          try:
+              user_info = omron.get_user()
+              print("\n--- OMRON User Info ---")
+              print("User:", getattr(user_info, '__dict__', str(user_info)))
+          except Exception as e:
+              print("get_user failed:", e)
+
           devices = omron.get_registered_devices(days=90)
-          print(f"Found {len(devices)} device(s)")
+          print(f"\nFound {len(devices)} device(s):", [d.name for d in devices])
 
+          # 檢查 _active_client 底層請求與日誌
+          client = omron._active_client
+          print("\nActive client type:", type(client))
+          print("Active client attributes:", [a for a in dir(client) if not a.startswith('__')])
+
+          # 嘗試攔截底層 get_measurements 呼叫
           for dev in devices:
-              print(f"\n--- Testing Raw API for {dev.name} ---")
-              # 調用底層 request 或檢查內部 API 端點
-              try:
-                  # 檢查 omron 內部 session 是否能取得原始資料
-                  if hasattr(omron, '_api_request'):
-                      resp = omron._api_request("GET", f"devices/{dev.macaddr}/measurements")
-                      print("Raw API Response:", resp)
-                  elif hasattr(omron, '_request'):
-                      resp = omron._request("GET", f"devices/{dev.macaddr}/measurements")
-                      print("Raw API Response:", resp)
-                  else:
-                      print("Available methods in omron client:", [m for m in dir(omron) if not m.startswith('__')])
-              except Exception as err:
-                  print(f"Direct raw call error: {err}")
+              print(f"\nProbing device: {dev.name} (MAC: {dev.macaddr})")
+              # 如果底層有 session / request 方法，測試直接調用
+              if hasattr(client, 'get_measurements'):
+                  try:
+                      res = client.get_measurements(dev)
+                      print("client.get_measurements result:", res)
+                  except Exception as e:
+                      print("client.get_measurements error:", e)
 
-              # 呼叫 get_measurements 並檢視原始回傳
+              # 印出實際發送的 URL 與 response
+              if hasattr(client, 'session') and hasattr(client.session, 'hooks'):
+                  def log_response(r, *args, **kwargs):
+                      print(f"\n[HTTP {r.status_code}] {r.request.method} {r.request.url}")
+                      print("Request Headers:", r.request.headers)
+                      if r.request.body:
+                          print("Request Body:", r.request.body)
+                      print("Response Body (first 500 chars):", r.text[:500])
+                  client.session.hooks['response'] = [log_response]
+
               records = omron.get_measurements(dev, searchDateFrom=0, searchDateTo=0)
-              print("get_measurements result type:", type(records), "length:", len(records) if records else 0)
+              print("\nFinal get_measurements returned:", len(records) if records else 0, "records")
           EOF
