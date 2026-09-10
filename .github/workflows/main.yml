@@ -3,7 +3,7 @@ name: Sync OMRON to Garmin
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動同步
+    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動執行
 
 jobs:
   sync:
@@ -22,7 +22,7 @@ jobs:
           pip install -e .
           pip install keyrings.alt
 
-      - name: Generate Config and Sync
+      - name: Setup Config and Sync
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
@@ -30,6 +30,7 @@ jobs:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           GARMIN_IS_CN: "0"
+          GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           OMRAMIN_KEYRING_BACKEND: "file"
           PYTHONUNBUFFERED: "1"
         run: |
@@ -60,8 +61,26 @@ jobs:
           with open("config.json", "w", encoding="utf-8") as f:
               json.dump(config_data, f, indent=2)
 
-          print("Generated config.json successfully.")
+          # 建立 keyrings.alt 純文字密鑰檔案，注入 Garmin Token
+          token_dir = os.path.expanduser("~/.local/share/python_keyring")
+          os.makedirs(token_dir, exist_ok=True)
+          token_file = os.path.join(token_dir, "keyring_pass.cfg")
+
+          garmin_email = os.environ["GARMIN_EMAIL"]
+          garmin_token = os.environ["GARMIN_TOKENS"]
+
+          with open(token_file, "w", encoding="utf-8") as f:
+              f.write(f"[garmin]\n{garmin_email} = {garmin_token}\n")
+
+          # 備份至專案目錄的 tokens.json 確保各種路徑讀取相容
+          tokens_json = {
+              f"garmin:{garmin_email}": garmin_token
+          }
+          with open("config.tokens.json", "w", encoding="utf-8") as f:
+              json.dump(tokens_json, f, indent=2)
+
+          print("Garmin OAuth Tokens injected successfully.")
           EOF
 
-          echo "=== Starting OMRON to Garmin Sync ==="
+          echo "=== Starting Sync to Garmin Connect ==="
           omramin sync --days 90
