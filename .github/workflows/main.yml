@@ -32,8 +32,8 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          import copy
-          from datetime import datetime
+          from dataclasses import replace
+          from datetime import datetime, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
@@ -57,24 +57,46 @@ jobs:
           devices = omron.get_registered_devices(days=90)
           print(f"Found {len(devices)} device(s)")
 
+          # 準備日期範圍
+          now = datetime.now()
+          d_from_14 = int((now - timedelta(days=90)).strftime("%Y%m%d000000"))
+          d_to_14 = int(now.strftime("%Y%m%d235959"))
+          d_from_8 = int((now - timedelta(days=90)).strftime("%Y%m%d"))
+          d_to_8 = int(now.strftime("%Y%m%d"))
+
           all_records = []
           for base_dev in devices:
-              # 交叉測試 user 1 與 user 2
-              for user_id in [1, 2]:
-                  dev = copy.copy(base_dev)
-                  dev.user = user_id
-                  print(f"\nChecking device {dev.name} for User {user_id}...")
-                  
-                  # 測試 0, 0 全量查詢
-                  try:
-                      records = omron.get_measurements(dev, searchDateFrom=0, searchDateTo=0)
-                      if records:
-                          print(f"  -> User {user_id} matched! Found {len(records)} record(s).")
-                          all_records.extend(records)
-                      else:
-                          print(f"  -> User {user_id}: 0 records returned.")
-                  except Exception as err:
-                      print(f"  -> User {user_id} query error: {err}")
+              print(f"\nTarget Device: {base_dev.name} (MAC: {base_dev.macaddr}, Registered User: {base_dev.user})")
+              
+              # 依序測試原登記 User 以及 User 1、User 2
+              tested_users = [base_dev.user] if base_dev.user else [1, 2]
+              if 1 not in tested_users: tested_users.append(1)
+              if 2 not in tested_users: tested_users.append(2)
+
+              for u in tested_users:
+                  dev = replace(base_dev, user=u)
+                  print(f"--- Checking for User {u} ---")
+
+                  # 嘗試三種可能被 API 接受的日期格式
+                  attempts = [
+                      ("14-digit (YYYYMMDDhhmmss)", d_from_14, d_to_14),
+                      ("8-digit (YYYYMMDD)", d_from_8, d_to_8),
+                      ("Zero-range (0, 0)", 0, 0),
+                  ]
+
+                  for label, f_from, f_to in attempts:
+                      try:
+                          rec = omron.get_measurements(dev, searchDateFrom=f_from, searchDateTo=f_to)
+                          count = len(rec) if rec else 0
+                          print(f"  [{label}] -> {count} records")
+                          if count > 0:
+                              all_records.extend(rec)
+                              break
+                      except Exception as err:
+                          print(f"  [{label}] error: {err}")
+
+                  if all_records:
+                      break
 
           print(f"\nTotal blood pressure records fetched: {len(all_records)}")
 
@@ -109,5 +131,5 @@ jobs:
 
               print(f"\nSuccessfully synced {uploaded}/{len(all_records)} record(s) to Garmin Connect!")
           else:
-              print("\nNo records found. Please ensure the phone app shows measurement history under this account.")
+              print("\nNo records found across all formats.")
           EOF
