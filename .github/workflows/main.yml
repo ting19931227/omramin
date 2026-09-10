@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install garminconnect garth
+          pip install garminconnect garth httpx
 
       - name: Direct Sync with Token
         env:
@@ -53,43 +53,24 @@ jobs:
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
-          # 檢查帳號資訊
-          try:
-              user_info = omron.get_user()
-              print("\n--- OMRON User Info ---")
-              print("User:", getattr(user_info, '__dict__', str(user_info)))
-          except Exception as e:
-              print("get_user failed:", e)
-
           devices = omron.get_registered_devices(days=90)
-          print(f"\nFound {len(devices)} device(s):", [d.name for d in devices])
+          print(f"Found {len(devices)} device(s)")
 
-          # 檢查 _active_client 底層請求與日誌
           client = omron._active_client
-          print("\nActive client type:", type(client))
-          print("Active client attributes:", [a for a in dir(client) if not a.startswith('__')])
+          hx = getattr(client, '_client', None)
 
-          # 嘗試攔截底層 get_measurements 呼叫
+          # 攔截 httpx 回應並印出實際 URL 與 Body
+          if hx:
+              orig_send = hx.send
+              def custom_send(request, *args, **kwargs):
+                  resp = orig_send(request, *args, **kwargs)
+                  print(f"\n[HTTP {resp.status_code}] {request.method} {request.url}")
+                  print("Response body:", resp.text[:1000])
+                  return resp
+              hx.send = custom_send
+
           for dev in devices:
-              print(f"\nProbing device: {dev.name} (MAC: {dev.macaddr})")
-              # 如果底層有 session / request 方法，測試直接調用
-              if hasattr(client, 'get_measurements'):
-                  try:
-                      res = client.get_measurements(dev)
-                      print("client.get_measurements result:", res)
-                  except Exception as e:
-                      print("client.get_measurements error:", e)
-
-              # 印出實際發送的 URL 與 response
-              if hasattr(client, 'session') and hasattr(client.session, 'hooks'):
-                  def log_response(r, *args, **kwargs):
-                      print(f"\n[HTTP {r.status_code}] {r.request.method} {r.request.url}")
-                      print("Request Headers:", r.request.headers)
-                      if r.request.body:
-                          print("Request Body:", r.request.body)
-                      print("Response Body (first 500 chars):", r.text[:500])
-                  client.session.hooks['response'] = [log_response]
-
+              print(f"\nProbing get_measurements for {dev.name}...")
               records = omron.get_measurements(dev, searchDateFrom=0, searchDateTo=0)
-              print("\nFinal get_measurements returned:", len(records) if records else 0, "records")
+              print(f"Parsed records count: {len(records) if records else 0}")
           EOF
