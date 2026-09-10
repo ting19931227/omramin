@@ -33,96 +33,48 @@ jobs:
           import os
           import sys
           import json
-          from datetime import datetime, timedelta
-          import garth
-          from garminconnect import Garmin
+          import httpx
           from omronconnect import OmronClient
 
-          # 1. 載入 Garmin Token
-          garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
-          garth.client.loads(garmin_tokens)
-          garmin = Garmin(is_cn=False)
-          garmin.client = garth.client
-          print("Garmin session loaded successfully!")
-
-          # 2. 登入 OMRON
+          print("Logging into OMRON Connect (TW)...")
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
           client = omron._active_client
           hx = getattr(client, '_client', None)
-
-          now = datetime.now()
-          d_from = int((now - timedelta(days=90)).strftime("%Y%m%d000000"))
-          d_to = int((now + timedelta(days=1)).strftime("%Y%m%d235959"))
-
-          # 使用完整的 OMRON API 端點
-          url = "https://data-jp.omronconnect.com/api/apps/1e3ddd17/server-code/versions/current/measureData"
           headers = client._headers
 
-          print(f"\nQuerying OMRON cloud from {d_from} to {d_to}...")
+          print("\n=== Active Client Configuration ===")
+          print("Base URL:", getattr(client, '_APP_URL', 'None'))
+          print("Server:", getattr(client, '_server', 'None'))
 
-          payloads = [
-              {"name": "No-Model Filter (14-digit)", "data": {"deviceCategory": "0", "searchDateFrom": d_from, "searchDateTo": d_to}},
-              {"name": "No-Model Filter (0, 0)", "data": {"deviceCategory": "0", "searchDateFrom": 0, "searchDateTo": 0}},
-              {"name": "With Model List (HEM-6232T)", "data": {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T"}], "searchDateFrom": 0, "searchDateTo": 0}},
-              {"name": "With Model List (HEM-6232T-AP)", "data": {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T-AP"}], "searchDateFrom": 0, "searchDateTo": 0}}
+          # 1. 檢視已註冊裝置的完整伺服器原始 JSON
+          print("\n=== Probing Registered Devices Raw Data ===")
+          try:
+              dev_url = "https://data-jp.omronconnect.com/api/apps/1e3ddd17/server-code/versions/current/registeredDevices"
+              r_dev = hx.post(dev_url, json={"days": 90}, headers=headers)
+              print("registeredDevices response:", r_dev.text)
+          except Exception as e:
+              print("registeredDevices error:", e)
+
+          # 2. 測試常見的歐姆龍雲端數據端點 (包含血壓日記、最新數據、用戶資料)
+          test_endpoints = [
+              ("latestMeasureData", {"deviceCategory": "0"}),
+              ("bloodPressureDiary", {"searchDateFrom": 0, "searchDateTo": 0}),
+              ("continuousData", {"deviceCategory": "0", "searchDateFrom": 0, "searchDateTo": 0}),
+              ("panelData", {"searchDateFrom": 0, "searchDateTo": 0}),
+              ("vitalData", {"category": "0"}),
           ]
 
-          raw_records = []
-          for p in payloads:
-              print(f"\n-> Trying payload: {p['name']}")
+          print("\n=== Probing Alternative Data Endpoints ===")
+          for ep, payload in test_endpoints:
+              url = f"https://data-jp.omronconnect.com/api/apps/1e3ddd17/server-code/versions/current/{ep}"
               try:
-                  resp = hx.post(url, json=p['data'], headers=headers)
-                  print(f"Status: {resp.status_code}")
-                  res_json = resp.json()
-                  print("Response body preview:", json.dumps(res_json, ensure_ascii=False)[:300])
-
-                  returned = res_json.get("returnedValue", {})
-                  model_list = returned.get("deviceModelList")
-                  if model_list:
-                      print(f"  ==> SUCCESS! Found data in deviceModelList!")
-                      for m in model_list:
-                          for user in m.get("userDataList", []):
-                              for item in user.get("measurementDataList", []):
-                                  raw_records.append(item)
-                      if raw_records:
-                          break
+                  res = hx.post(url, json=payload, headers=headers)
+                  print(f"\nEndpoint [{ep}] -> HTTP {res.status_code}")
+                  if res.status_code == 200:
+                      print("Response:", res.text[:400])
               except Exception as err:
-                  print("Request error:", err)
-
-          print(f"\nTotal blood pressure records extracted: {len(raw_records)}")
-
-          # 3. 上傳至 Garmin
-          if raw_records:
-              print(f"\n3. Uploading {len(raw_records)} record(s) to Garmin Connect...")
-              uploaded = 0
-              for item in raw_records:
-                  try:
-                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime") or item.get("measureDateTime"))
-                      sys_val = item.get("sys") or item.get("systolic")
-                      dia_val = item.get("dia") or item.get("diastolic")
-                      pulse_val = item.get("pulse") or item.get("heartRate")
-
-                      if len(dt_raw) >= 14:
-                          dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
-                          time_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
-                      else:
-                          time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                      garmin.set_blood_pressure(
-                          systolic=int(sys_val),
-                          diastolic=int(dia_val),
-                          pulse=int(pulse_val) if pulse_val else None,
-                          timestamp=time_str
-                      )
-                      uploaded += 1
-                      print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
-                  except Exception as ex:
-                      print(f"  [Skip/Err] {ex} - Item: {item}")
-
-              print(f"\nCompleted! Synced {uploaded}/{len(raw_records)} record(s) to Garmin Connect!")
-          else:
-              print("\nNo records extracted from responses.")
+                  print(f"Endpoint [{ep}] request failed:", err)
           EOF
