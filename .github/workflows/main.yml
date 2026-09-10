@@ -1,7 +1,9 @@
 name: Sync OMRON to Garmin
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 支援手動點擊同步
+  schedule:
+    - cron: '0 21 * * *' # 每天台灣時間早上 05:00 自動執行 (UTC 21:00)
 
 jobs:
   sync:
@@ -15,44 +17,33 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install omramin
         run: |
           pip install -e .
 
-      - name: Verify Login and List Devices
-        env:
-          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
-          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+      - name: Setup Config
         run: |
-          python - << 'EOF'
-          import os
-          from omronconnect import OmronClient
-
-          email = os.environ['OMRON_EMAIL']
-          password = os.environ['OMRON_PASSWORD']
-
-          print(f"Connecting to OMRON with: {email}")
-          
-          # 嘗試台灣與亞洲伺服器
-          for country in ['TW', 'JP', 'US', 'GB']:
-              print(f"\n--- Trying country: {country} ---")
-              try:
-                  client = OmronClient(country=country)
-                  login_resp = client.login(email, password)
-                  print("Login response:", login_resp)
-                  
-                  # 檢查登入後取得的血壓計設備
-                  print("Inspecting client attributes:")
-                  for attr in ['devices', 'device_list', '_devices']:
-                      if hasattr(client, attr):
-                          print(f"  {attr}: {getattr(client, attr)}")
-                  
-                  if hasattr(client, 'client') and hasattr(client.client, 'get_devices'):
-                      devs = client.client.get_devices()
-                      print("Found devices via inner client:", devs)
-                  
-                  print(f"SUCCESS with {country}!")
-                  break
-              except Exception as e:
-                  print(f"Failed with {country}: {e}")
+          mkdir -p ~/.config/omramin
+          cat <<EOF > ~/.config/omramin/config.json
+          {
+            "omron": {
+              "email": "${{ secrets.OMRON_EMAIL }}",
+              "password": "${{ secrets.OMRON_PASSWORD }}",
+              "country": "TW"
+            },
+            "garmin": {
+              "email": "${{ secrets.GARMIN_EMAIL }}",
+              "password": "${{ secrets.GARMIN_PASSWORD }}"
+            },
+            "devices": {
+              "BP Monitor": {
+                "category": "bpm",
+                "user": 1
+              }
+            }
+          }
           EOF
+
+      - name: Run sync
+        run: |
+          omramin sync --days 90
