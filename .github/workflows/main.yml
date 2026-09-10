@@ -20,6 +20,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
+          # 安裝 keyrings.alt 支援在無 GUI 的 Linux Actions 環境下儲存 token
+          pip install keyrings.alt
 
       - name: Generate Config and Sync
         env:
@@ -27,6 +29,7 @@ jobs:
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
           import json
@@ -57,5 +60,9 @@ jobs:
           print("Generated config.json successfully.")
           EOF
 
-          # 直接執行同步 90 天血壓紀錄至 Garmin Connect
-          omramin sync --days 90
+          # 直接透過參數傳遞憑證執行同步
+          omramin sync --days 90 \
+            --omron-email "$OMRON_EMAIL" \
+            --omron-password "$OMRON_PASSWORD" \
+            --garmin-email "$GARMIN_EMAIL" \
+            --garmin-password "$GARMIN_PASSWORD"
