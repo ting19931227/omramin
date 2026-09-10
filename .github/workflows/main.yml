@@ -32,8 +32,9 @@ jobs:
           python - << 'EOF'
           import os
           import sys
+          import json
           import time
-          from datetime import datetime
+          from datetime import datetime, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
@@ -79,62 +80,74 @@ jobs:
           models = val.get("deviceModelList", []) if isinstance(val, dict) else []
           for m in models:
               for s in m.get("deviceSerialIDList", []):
-                  user_num = s.get("userNumberInDevice", 1)
-                  measures = s.get("measureList", [])
-                  print(f"Device: {m.get('deviceModel')} (User {user_num}) -> {len(measures)} records")
-                  raw_records.extend(measures)
+                  raw_records.extend(s.get("measureList", []))
 
-          print(f"\nTotal extracted records: {len(raw_records)}")
+          print(f"\nTotal extracted records from OMRON: {len(raw_records)}")
 
-          # 3. 解析 bodyIndexList 並上傳至 Garmin Connect
-          if raw_records:
-              print(f"\n3. Uploading {len(raw_records)} record(s) to Garmin Connect...")
-              uploaded = 0
-              # 依時間順序由舊到新排序上傳
-              raw_records.sort(key=lambda x: str(x.get("measureDeviceDateFrom") or x.get("measureDateFrom", 0)))
+          # 3. 過濾資料：只同步最近 14 天內的量測（避開 200 筆高頻衝擊觸發 WAF 403）
+          cutoff_date = datetime.now() - timedelta(days=14)
+          recent_records = []
 
-              for item in raw_records:
-                  try:
-                      body_indices = item.get("bodyIndexList", {})
-                      # 1: 收縮壓, 2: 舒張壓, 3: 脈搏
-                      sys_arr = body_indices.get("1")
-                      dia_arr = body_indices.get("2")
-                      pulse_arr = body_indices.get("3")
+          for item in raw_records:
+              dt_raw = str(item.get("measureDeviceDateFrom") or "")
+              dt_obj = None
+              if len(dt_raw) >= 14:
+                  dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
+              else:
+                  ts_ms = item.get("measureDateFrom") or item.get("transferDate")
+                  if ts_ms:
+                      dt_obj = datetime.fromtimestamp(ts_ms / 1000.0)
 
-                      if not (sys_arr and dia_arr):
-                          continue
+              if dt_obj and dt_obj >= cutoff_date:
+                  item['_parsed_dt'] = dt_obj
+                  recent_records.append(item)
 
-                      sys_val = int(sys_arr[0])
-                      dia_val = int(dia_arr[0])
-                      pulse_val = int(pulse_arr[0]) if pulse_arr else None
+          print(f"Filtered to {len(recent_records)} record(s) within the last 14 days.")
 
-                      # 解析時間: 優先使用 17 碼或 14 碼 measureDeviceDateFrom (例: 20260910075833000)
-                      dt_raw = str(item.get("measureDeviceDateFrom") or "")
-                      if len(dt_raw) >= 14:
-                          dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
-                          time_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
-                      else:
-                          ts_ms = item.get("measureDateFrom") or item.get("transferDate")
-                          if ts_ms:
-                              time_str = datetime.fromtimestamp(ts_ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-                          else:
-                              time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+          if not recent_records and raw_records:
+              print("No records in the last 14 days, taking the latest 3 records instead...")
+              # 若最近 14 天內少於 1 筆，抓最新 3 筆測試
+              raw_records.sort(key=lambda x: str(x.get("measureDeviceDateFrom") or 0), reverse=True)
+              for item in raw_records[:3]:
+                  dt_raw = str(item.get("measureDeviceDateFrom") or "")
+                  dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S") if len(dt_raw) >= 14 else datetime.now()
+                  item['_parsed_dt'] = dt_obj
+                  recent_records.append(item)
 
-                      # 寫入 Garmin Connect
-                      garmin.set_blood_pressure(
-                          systolic=sys_val,
-                          diastolic=dia_val,
-                          pulse=pulse_val,
-                          timestamp=time_str
-                      )
-                      uploaded += 1
-                      print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
-                  except Exception as ex:
-                      print(f"  [Skip/Err] {ex} - Item date: {item.get('measureDeviceDateFrom')}")
+          # 由舊到新排序
+          recent_records.sort(key=lambda x: x['_parsed_dt'])
 
-              print(f"\n==========================================")
-              print(f"Successfully synced {uploaded}/{len(raw_records)} record(s) to Garmin Connect!")
-              print(f"==========================================")
-          else:
-              print("\nNo records available to sync.")
+          # 4. 上傳至 Garmin Connect（加入 1 秒緩衝延遲）
+          uploaded = 0
+          for item in recent_records:
+              try:
+                  body_indices = item.get("bodyIndexList", {})
+                  sys_arr = body_indices.get("1")
+                  dia_arr = body_indices.get("2")
+                  pulse_arr = body_indices.get("3")
+
+                  if not (sys_arr and dia_arr):
+                      continue
+
+                  sys_val = int(sys_arr[0])
+                  dia_val = int(dia_arr[0])
+                  pulse_val = int(pulse_arr[0]) if pulse_arr else None
+                  time_str = item['_parsed_dt'].strftime("%Y-%m-%d %H:%M:%S")
+
+                  garmin.set_blood_pressure(
+                      systolic=sys_val,
+                      diastolic=dia_val,
+                      pulse=pulse_val,
+                      timestamp=time_str
+                  )
+                  uploaded += 1
+                  print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                  # 加入延遲以符合 Garmin API 頻率限制
+                  time.sleep(1.2)
+              except Exception as ex:
+                  print(f"  [Skip/Err] {ex} - Item date: {item.get('measureDeviceDateFrom')}")
+
+          print(f"\n==========================================")
+          print(f"Successfully synced {uploaded}/{len(recent_records)} record(s) to Garmin Connect!")
+          print(f"==========================================")
           EOF
