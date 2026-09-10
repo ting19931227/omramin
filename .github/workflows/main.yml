@@ -44,10 +44,10 @@ jobs:
 
           # 1. 驗證 Garmin Token Session
           print("1. Loading Garmin session using Token...")
-          garth.loads(garmin_tokens)
+          garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
-          print(f"Garmin session loaded successfully! Logged in as: {garth.client.username or 'Authenticated User'}")
+          print("Garmin session loaded successfully!")
 
           # 2. 登入 OMRON Connect (TW)
           print("\n2. Logging into OMRON Connect (TW)...")
@@ -65,7 +65,6 @@ jobs:
           all_records = []
           for dev in devices:
               print(f"\nFetching data for {dev.name} (MAC: {dev.macaddr})...")
-              # 嘗試不同的參數組合調用
               fetched = None
               for try_call in [
                   lambda: omron.get_measurements(dev, start_date=start_date, end_date=end_date),
@@ -76,7 +75,7 @@ jobs:
                       fetched = try_call()
                       if fetched:
                           break
-                  except Exception as e:
+                  except Exception:
                       pass
 
               if fetched:
@@ -93,7 +92,6 @@ jobs:
               uploaded = 0
               for r in all_records:
                   try:
-                      # 取得時間與血壓數據
                       timestamp = getattr(r, 'timestamp', None) or getattr(r, 'dateTime', None)
                       systolic = getattr(r, 'systolic', None)
                       diastolic = getattr(r, 'diastolic', None)
@@ -117,5 +115,5 @@ jobs:
 
               print(f"\nSuccessfully synced {uploaded}/{len(all_records)} record(s) to Garmin Connect!")
           else:
-              print("\nHint: Please open the OMRON connect mobile app and pull down to refresh to ensure data is synced to cloud.")
+              print("\nHint: Please ensure your OMRON app has synced latest measurements to the cloud.")
           EOF
