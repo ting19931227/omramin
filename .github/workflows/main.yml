@@ -1,9 +1,9 @@
 name: Sync OMRON to Garmin
 
 on:
-  workflow_dispatch: # 支援手動點擊同步
+  workflow_dispatch:
   schedule:
-    - cron: '0 21 * * *' # 每天台灣時間早上 05:00 自動執行 (UTC 21:00)
+    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動執行
 
 jobs:
   sync:
@@ -17,33 +17,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install omramin
+      - name: Install dependencies
         run: |
           pip install -e .
 
-      - name: Setup Config
+      - name: Run Direct Python Sync
+        env:
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
         run: |
-          mkdir -p ~/.config/omramin
-          cat <<EOF > ~/.config/omramin/config.json
-          {
-            "omron": {
-              "email": "${{ secrets.OMRON_EMAIL }}",
-              "password": "${{ secrets.OMRON_PASSWORD }}",
-              "country": "TW"
-            },
-            "garmin": {
-              "email": "${{ secrets.GARMIN_EMAIL }}",
-              "password": "${{ secrets.GARMIN_PASSWORD }}"
-            },
-            "devices": {
-              "BP Monitor": {
-                "category": "bpm",
-                "user": 1
-              }
-            }
-          }
-          EOF
+          python - << 'EOF'
+          import os
+          from omronconnect import OmronClient
 
-      - name: Run sync
-        run: |
-          omramin sync --days 90
+          omron_user = os.environ['OMRON_EMAIL']
+          omron_pwd = os.environ['OMRON_PASSWORD']
+
+          print("1. Logging into OMRON Connect (TW)...")
+          omron = OmronClient(country='TW')
+          omron.login(omron_user, omron_pwd)
+          print("OMRON Login successful!")
+
+          # 列出所有可用的方法與資料
+          methods = [m for m in dir(omron) if not m.startswith('_')]
+          print("Available methods on OmronClient:", methods)
+          EOF
