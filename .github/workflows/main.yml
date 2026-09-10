@@ -21,7 +21,7 @@ jobs:
         run: |
           pip install -e .
 
-      - name: Run Full Sync to Garmin
+      - name: Configure Omramin and Sync
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
@@ -29,38 +29,31 @@ jobs:
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
         run: |
           python - << 'EOF'
+          import json
           import os
-          import inspect
-          from omronconnect import OmronClient
-          from omramin import sync
 
-          omron_user = os.environ['OMRON_EMAIL']
-          omron_pwd = os.environ['OMRON_PASSWORD']
-          garmin_user = os.environ['GARMIN_EMAIL']
-          garmin_pwd = os.environ['GARMIN_PASSWORD']
+          # 建立 omramin 所需的設定檔結構
+          config_path = os.path.expanduser("~/.config/omramin/config.json")
+          os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
-          print("1. Logging into OMRON Connect...")
-          client = OmronClient(country='TW')
-          client.login(omron_user, omron_pwd)
-          print("OMRON Login successful.")
+          device = {
+              "name": "HEM-6232T-AP:1",
+              "macaddr": "b2:ff:fe:c4:e1:3c",
+              "category": "BPM",
+              "user": 1,
+              "enabled": True
+          }
 
-          devices = client.get_registered_devices(days=180)
-          print(f"Found {len(devices)} device(s):", devices)
+          config_data = {
+              "devices": [device]
+          }
 
-          # 檢查 get_measurements 接受的參數
-          sig = inspect.signature(client.get_measurements)
-          print("get_measurements signature:", sig)
+          with open(config_path, "w", encoding="utf-8") as f:
+              json.dump(config_data, f, indent=2)
 
-          for dev in devices:
-              # 嘗試傳入 180 天
-              try:
-                  records = client.get_measurements(dev, days=180)
-              except TypeError:
-                  records = client.get_measurements(dev)
-              
-              print(f"Records found for {dev.name}: {len(records) if isinstance(records, list) else records}")
-
-          print("\n2. Executing omramin sync with known device...")
-          # 寫入設定檔確保原生指令也能自動抓到這台 HEM-6232T
-          os.system("omramin sync --days 180 || true")
+          print(f"Config successfully written to {config_path}:")
+          print(json.dumps(config_data, indent=2))
           EOF
+
+          # 執行原生 omramin 抓取 90 天數據同步到 Garmin
+          omramin sync --days 90
