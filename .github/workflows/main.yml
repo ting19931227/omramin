@@ -20,67 +20,88 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install keyrings.alt
+          pip install garminconnect
 
-      - name: Setup Config and Sync
+      - name: Direct Sync with Token
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
           OMRON_COUNTRY: "TW"
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-          GARMIN_IS_CN: "0"
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
-          OMRAMIN_KEYRING_BACKEND: "file"
           PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
-          import json
           import os
+          import sys
+          from datetime import datetime
+          from omronconnect import OmronClient
+          from garminconnect import Garmin
 
-          config_data = {
-              "omron": {
-                  "email": os.environ["OMRON_EMAIL"],
-                  "country": "TW",
-                  "devices": [
-                      {
-                          "name": "HEM-6232T-AP:1",
-                          "macaddr": "b2:ff:fe:c4:e1:3c",
-                          "category": "BPM",
-                          "user": 1,
-                          "enabled": True
-                      }
-                  ]
-              },
-              "garmin": {
-                  "email": os.environ["GARMIN_EMAIL"],
-                  "is_cn": False
-              }
-          }
+          omron_user = os.environ['OMRON_EMAIL']
+          omron_pwd = os.environ['OMRON_PASSWORD']
+          garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
 
-          with open("config.json", "w", encoding="utf-8") as f:
-              json.dump(config_data, f, indent=2)
+          if not garmin_tokens:
+              print("Error: GARMIN_TOKENS secret is missing.")
+              sys.exit(1)
 
-          # 建立 keyrings.alt 純文字密鑰檔案，注入 Garmin Token
-          token_dir = os.path.expanduser("~/.local/share/python_keyring")
-          os.makedirs(token_dir, exist_ok=True)
-          token_file = os.path.join(token_dir, "keyring_pass.cfg")
+          # 1. 登入 OMRON 並抓取血壓
+          print("1. Logging into OMRON Connect (TW)...")
+          omron = OmronClient(country='TW')
+          omron.login(omron_user, omron_pwd)
+          print("OMRON Login successful.")
 
-          garmin_email = os.environ["GARMIN_EMAIL"]
-          garmin_token = os.environ["GARMIN_TOKENS"]
+          devices = omron.get_registered_devices(days=90)
+          print(f"Found {len(devices)} device(s):", [d.name for d in devices])
 
-          with open(token_file, "w", encoding="utf-8") as f:
-              f.write(f"[garmin]\n{garmin_email} = {garmin_token}\n")
+          all_records = []
+          for dev in devices:
+              try:
+                  records = omron.get_measurements(dev, days=90)
+              except TypeError:
+                  records = omron.get_measurements(dev)
+              if records:
+                  all_records.extend(records)
 
-          # 備份至專案目錄的 tokens.json 確保各種路徑讀取相容
-          tokens_json = {
-              f"garmin:{garmin_email}": garmin_token
-          }
-          with open("config.tokens.json", "w", encoding="utf-8") as f:
-              json.dump(tokens_json, f, indent=2)
+          print(f"Total blood pressure records fetched from OMRON: {len(all_records)}")
 
-          print("Garmin OAuth Tokens injected successfully.")
+          # 2. 透過 Token 載入 Garmin (免除密碼登入與 Cloudflare 阻擋)
+          print("\n2. Loading Garmin session using Token...")
+          garmin = Garmin(is_cn=False)
+          garmin.garth.loads(garmin_tokens)
+          print("Garmin session loaded successfully!")
+
+          # 3. 上傳血壓數據
+          if all_records:
+              print(f"\n3. Uploading {len(all_records)} record(s) to Garmin Connect...")
+              uploaded = 0
+              for r in all_records:
+                  try:
+                      # omronconnect 記錄格式通常包含 systolic, diastolic, pulse, timestamp
+                      # Garmin set_blood_pressure 支援 (systolic, diastolic, pulse, timestamp)
+                      timestamp = getattr(r, 'timestamp', None) or getattr(r, 'dateTime', None)
+                      systolic = getattr(r, 'systolic', None)
+                      diastolic = getattr(r, 'diastolic', None)
+                      pulse = getattr(r, 'pulse', None) or getattr(r, 'heart_rate', None)
+
+                      if isinstance(timestamp, str):
+                          timestamp = datetime.fromisoformat(timestamp)
+
+                      time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if timestamp else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                      
+                      garmin.set_blood_pressure(
+                          systolic=int(systolic),
+                          diastolic=int(diastolic),
+                          pulse=int(pulse) if pulse else None,
+                          timestamp=time_str
+                      )
+                      uploaded += 1
+                      print(f"  [OK] Synced: {time_str} -> {systolic}/{diastolic} mmHg (HR: {pulse})")
+                  except Exception as err:
+                      print(f"  [Skip/Err] {err} - Data: {r}")
+
+              print(f"\nCompleted! {uploaded}/{len(all_records)} record(s) synced to Garmin Connect.")
+          else:
+              print("No records to sync. (Make sure you refreshed the OMRON connect mobile app)")
           EOF
-
-          echo "=== Starting Sync to Garmin Connect ==="
-          omramin sync --days 90
