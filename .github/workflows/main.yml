@@ -33,16 +33,13 @@ jobs:
           import os
           import sys
           import json
+          from datetime import datetime, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
+          # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
-          if not garmin_tokens:
-              print("Error: GARMIN_TOKENS is missing.")
-              sys.exit(1)
-
-          # 1. 載入 Garmin
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
@@ -53,24 +50,82 @@ jobs:
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
-          devices = omron.get_registered_devices(days=90)
-          print(f"Found {len(devices)} device(s)")
-
           client = omron._active_client
           hx = getattr(client, '_client', None)
 
-          # 攔截 httpx 回應並印出實際 URL 與 Body
-          if hx:
-              orig_send = hx.send
-              def custom_send(request, *args, **kwargs):
-                  resp = orig_send(request, *args, **kwargs)
-                  print(f"\n[HTTP {resp.status_code}] {request.method} {request.url}")
-                  print("Response body:", resp.text[:1000])
-                  return resp
-              hx.send = custom_send
+          now = datetime.now()
+          d_from = int((now - timedelta(days=90)).strftime("%Y%m%d000000"))
+          d_to = int(now.strftime("%Y%m%d235959"))
 
-          for dev in devices:
-              print(f"\nProbing get_measurements for {dev.name}...")
-              records = omron.get_measurements(dev, searchDateFrom=0, searchDateTo=0)
-              print(f"Parsed records count: {len(records) if records else 0}")
+          # 測試不同的 API Payload 組合直接向伺服器調用
+          url = f"{client._APP_URL}/measureData"
+          headers = client._headers
+
+          print(f"\nQuerying OMRON cloud from {d_from} to {d_to}...")
+
+          # 組合 1: 僅以分類 0 (血壓) + 14碼時間查詢 (不綁 deviceModel，避免型號名稱不匹配)
+          payloads = [
+              {"name": "No-Model Filter (14-digit)", "data": {"deviceCategory": "0", "searchDateFrom": d_from, "searchDateTo": d_to}},
+              {"name": "No-Model Filter (0, 0)", "data": {"deviceCategory": "0", "searchDateFrom": 0, "searchDateTo": 0}},
+              {"name": "With Model List (HEM-6232T)", "data": {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T"}], "searchDateFrom": 0, "searchDateTo": 0}}
+          ]
+
+          raw_records = []
+          for p in payloads:
+              print(f"\n-> Trying payload: {p['name']}")
+              try:
+                  resp = hx.post(url, json=p['data'], headers=headers)
+                  print(f"Status: {resp.status_code}")
+                  res_json = resp.json()
+                  print("Response preview:", json.dumps(res_json, ensure_ascii=False)[:300])
+
+                  returned = res_json.get("returnedValue", {})
+                  model_list = returned.get("deviceModelList")
+                  if model_list:
+                      print(f"  ==> SUCCESS! Found data in deviceModelList!")
+                      # 解析回傳的量測資料
+                      for m in model_list:
+                          for user in m.get("userDataList", []):
+                              for item in user.get("measurementDataList", []):
+                                  raw_records.append(item)
+                      if raw_records:
+                          break
+              except Exception as err:
+                  print("Request error:", err)
+
+          print(f"\nTotal blood pressure records extracted: {len(raw_records)}")
+
+          # 3. 上傳至 Garmin
+          if raw_records:
+              print(f"\n3. Uploading {len(raw_records)} record(s) to Garmin Connect...")
+              uploaded = 0
+              for item in raw_records:
+                  try:
+                      # 歐姆龍 JSON 典型欄位：measureDate, sys, dia, pulse
+                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime"))
+                      sys_val = item.get("sys") or item.get("systolic")
+                      dia_val = item.get("dia") or item.get("diastolic")
+                      pulse_val = item.get("pulse") or item.get("heartRate")
+
+                      # 解析 YYYYMMDDhhmmss
+                      if len(dt_raw) >= 14:
+                          dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
+                          time_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+                      else:
+                          time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                      garmin.set_blood_pressure(
+                          systolic=int(sys_val),
+                          diastolic=int(dia_val),
+                          pulse=int(pulse_val) if pulse_val else None,
+                          timestamp=time_str
+                      )
+                      uploaded += 1
+                      print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                  except Exception as ex:
+                      print(f"  [Skip/Err] {ex} - Item: {item}")
+
+              print(f"\nCompleted! Synced {uploaded}/{len(raw_records)} record(s) to Garmin Connect!")
+          else:
+              print("\nNo records extracted from responses.")
           EOF
