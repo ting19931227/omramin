@@ -3,7 +3,7 @@ name: Sync OMRON to Garmin
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點定時自動同步
+    - cron: '0 12 * * *'
 
 jobs:
   sync:
@@ -34,12 +34,12 @@ jobs:
           import sys
           import json
           import time
-          from datetime import datetime, timedelta
+          from datetime import datetime, timezone, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
-          # 1. 載入 Garmin Token Session
+          # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
@@ -50,7 +50,7 @@ jobs:
           garmin.client = garth.client
           print("Garmin session loaded successfully!")
 
-          # 2. 登入 OMRON 並抓取血壓數據
+          # 2. 登入 OMRON 並抓取血壓
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
@@ -82,72 +82,76 @@ jobs:
               for s in m.get("deviceSerialIDList", []):
                   raw_records.extend(s.get("measureList", []))
 
-          print(f"\nTotal extracted records from OMRON: {len(raw_records)}")
+          print(f"Total extracted records from OMRON: {len(raw_records)}")
 
-          # 3. 過濾資料：只同步最近 14 天內的量測（避開 200 筆高頻衝擊觸發 WAF 403）
+          # 篩選最新資料 (最近 14 天)
           cutoff_date = datetime.now() - timedelta(days=14)
           recent_records = []
-
           for item in raw_records:
               dt_raw = str(item.get("measureDeviceDateFrom") or "")
-              dt_obj = None
               if len(dt_raw) >= 14:
                   dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
-              else:
-                  ts_ms = item.get("measureDateFrom") or item.get("transferDate")
-                  if ts_ms:
-                      dt_obj = datetime.fromtimestamp(ts_ms / 1000.0)
-
-              if dt_obj and dt_obj >= cutoff_date:
-                  item['_parsed_dt'] = dt_obj
-                  recent_records.append(item)
-
-          print(f"Filtered to {len(recent_records)} record(s) within the last 14 days.")
+                  if dt_obj >= cutoff_date:
+                      item['_parsed_dt'] = dt_obj
+                      recent_records.append(item)
 
           if not recent_records and raw_records:
-              print("No records in the last 14 days, taking the latest 3 records instead...")
-              # 若最近 14 天內少於 1 筆，抓最新 3 筆測試
               raw_records.sort(key=lambda x: str(x.get("measureDeviceDateFrom") or 0), reverse=True)
-              for item in raw_records[:3]:
-                  dt_raw = str(item.get("measureDeviceDateFrom") or "")
-                  dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S") if len(dt_raw) >= 14 else datetime.now()
-                  item['_parsed_dt'] = dt_obj
-                  recent_records.append(item)
+              latest = raw_records[0]
+              dt_raw = str(latest.get("measureDeviceDateFrom") or "")
+              latest['_parsed_dt'] = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S") if len(dt_raw) >= 14 else datetime.now()
+              recent_records.append(latest)
 
-          # 由舊到新排序
-          recent_records.sort(key=lambda x: x['_parsed_dt'])
+          print(f"Targeting {len(recent_records)} record(s) for sync.")
 
-          # 4. 上傳至 Garmin Connect（加入 1 秒緩衝延遲）
-          uploaded = 0
+          # 3. 寫入 Garmin Connect
           for item in recent_records:
+              body_indices = item.get("bodyIndexList", {})
+              sys_val = int(body_indices["1"][0])
+              dia_val = int(body_indices["2"][0])
+              pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
+              dt_local = item['_parsed_dt']
+
+              # 轉換為 UTC ISO 8601 字串 (台灣時區 UTC+8)
+              tz_tw = timezone(timedelta(hours=8))
+              dt_with_tz = dt_local.replace(tzinfo=tz_tw)
+              dt_utc = dt_with_tz.astimezone(timezone.utc)
+              iso_utc_str = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+              local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+
+              print(f"\nAttempting sync: {local_str} (UTC: {iso_utc_str}) -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
+
+              # 嘗試方法 1: 直接透過 garth.client.post 打底層 API
+              url_bp = "https://connectapi.garmin.com/bloodpressure-service/bloodpressure"
+              bp_payload = {
+                  "measurementTimestampLocal": local_str.replace(" ", "T"),
+                  "measurementTimestampGMT": iso_utc_str,
+                  "systolic": sys_val,
+                  "diastolic": dia_val,
+                  "pulse": pulse_val,
+                  "sourceType": "MANUAL"
+              }
+
+              success = False
               try:
-                  body_indices = item.get("bodyIndexList", {})
-                  sys_arr = body_indices.get("1")
-                  dia_arr = body_indices.get("2")
-                  pulse_arr = body_indices.get("3")
+                  res = garth.client.post("connectapi", "bloodpressure-service/bloodpressure", json=bp_payload)
+                  print(f"  [Direct garth] Status: {getattr(res, 'status_code', 'OK')} -> Uploaded successfully!")
+                  success = True
+              except Exception as err1:
+                  print(f"  [Direct garth failed]: {err1}")
 
-                  if not (sys_arr and dia_arr):
-                      continue
+              # 嘗試方法 2: garmin.set_blood_pressure
+              if not success:
+                  try:
+                      garmin.set_blood_pressure(
+                          systolic=sys_val,
+                          diastolic=dia_val,
+                          pulse=pulse_val,
+                          timestamp=local_str
+                      )
+                      print(f"  [garmin.set_blood_pressure] Uploaded successfully!")
+                      success = True
+                  except Exception as err2:
+                      print(f"  [garmin.set_blood_pressure failed]: {err2}")
 
-                  sys_val = int(sys_arr[0])
-                  dia_val = int(dia_arr[0])
-                  pulse_val = int(pulse_arr[0]) if pulse_arr else None
-                  time_str = item['_parsed_dt'].strftime("%Y-%m-%d %H:%M:%S")
-
-                  garmin.set_blood_pressure(
-                      systolic=sys_val,
-                      diastolic=dia_val,
-                      pulse=pulse_val,
-                      timestamp=time_str
-                  )
-                  uploaded += 1
-                  print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
-                  # 加入延遲以符合 Garmin API 頻率限制
-                  time.sleep(1.2)
-              except Exception as ex:
-                  print(f"  [Skip/Err] {ex} - Item date: {item.get('measureDeviceDateFrom')}")
-
-          print(f"\n==========================================")
-          print(f"Successfully synced {uploaded}/{len(recent_records)} record(s) to Garmin Connect!")
-          print(f"==========================================")
           EOF
