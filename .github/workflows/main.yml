@@ -51,16 +51,11 @@ jobs:
               }
           }
 
-          # 寫入當前目錄的 config.json (符合 omramin 優先讀取規則)
           with open("config.json", "w", encoding="utf-8") as f:
               json.dump(config_data, f, indent=2)
 
-          print("Generated config.json successfully:")
-          print(json.dumps(config_data, indent=2))
+          print("Generated config.json successfully.")
           EOF
 
-          echo "=== 1. Checking configured devices ==="
-          omramin list-devices
-
-          echo "=== 2. Running Sync to Garmin Connect ==="
+          # 直接執行同步 90 天血壓紀錄至 Garmin Connect
           omramin sync --days 90
