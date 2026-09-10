@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install garminconnect garth
+          pip install garminconnect garth httpx
 
       - name: Direct Sync with Token
         env:
@@ -32,83 +32,106 @@ jobs:
           python - << 'EOF'
           import os
           import sys
+          import json
+          import inspect
           from datetime import datetime, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
-          # 1. 載入 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
           print("Garmin session loaded successfully!")
 
-          # 2. 測試歐姆龍支援的所有區域代碼
-          email = os.environ['OMRON_EMAIL']
-          pwd = os.environ['OMRON_PASSWORD']
+          omron = OmronClient(country='TW')
+          omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
+          print("OMRON Login successful.")
 
-          # 測試台灣可能落入的不同國家/伺服器分區
-          candidate_regions = ['TW', 'AP', 'SG', 'HK', 'US', 'DE']
-          target_omron = None
-          target_records = []
+          client = omron._active_client
+          print("\n=== omronconnect get_measurements Source Code ===")
+          try:
+              print(inspect.getsource(client.get_measurements))
+          except Exception as e:
+              print("Cannot inspect source:", e)
 
-          print("\n=== Testing OMRON Region Servers ===")
-          for reg in candidate_regions:
+          devs = omron.get_registered_devices(days=90)
+          dev = devs[0]
+          print(f"\nTarget device: {dev}")
+
+          hx = getattr(client, '_client', None)
+          url = f"{client._server}{client._APP_URL}/measureData"
+          print(f"API Target Endpoint: {url}")
+
+          # 測試多種常見的 OMRON measureData 參數組合
+          test_cases = [
+              # 組合 1: 帶入 deviceModelList 且指定 deviceModel 為空或特定型號
+              ("Model with AP", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T-AP"}]}),
+              ("Model with base", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T"}]}),
+              ("Model with user", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": "HEM-6232T", "user": 1}]}),
+              ("Model empty string", {"deviceCategory": "0", "deviceModelList": [{"deviceModel": ""}]}),
+              # 組合 2: 傳入字串型態的日期與數值
+              ("Date range (YYYYMMDD)", {"deviceCategory": "0", "searchDateFrom": 20260101, "searchDateTo": 20261231}),
+              ("Date range 14-digit", {"deviceCategory": "0", "searchDateFrom": 20260101000000, "searchDateTo": 20261231235959}),
+              # 組合 3: 帶入使用者 ID
+              ("With user 1", {"deviceCategory": "0", "user": 1}),
+              ("With user '1'", {"deviceCategory": "0", "user": "1"}),
+              # 組合 4: 完全無過濾
+              ("Empty payload", {}),
+              ("Category only", {"deviceCategory": "0"}),
+          ]
+
+          successful_records = []
+          for name, payload in test_cases:
               try:
-                  print(f"\n[Region: {reg}] Trying login & fetch...")
-                  client = OmronClient(country=reg)
-                  client.login(email, pwd)
-                  devs = client.get_registered_devices(days=90)
-                  print(f"  -> Connected! Found {len(devs)} device(s): {[d.name for d in devs]}")
-                  
-                  for d in devs:
-                      # 測試查詢 14 碼與 0 範圍
-                      recs = client.get_measurements(d, searchDateFrom=0, searchDateTo=0)
-                      print(f"  -> Device {d.name} returned {len(recs)} records")
-                      if recs:
-                          target_records = recs
-                          target_omron = client
-                          print(f"  ===> MATCH FOUND ON REGION [{reg}]! <===")
-                          break
-
-                  if target_records:
+                  res = hx.post(url, json=payload, headers=client._headers)
+                  data = res.json()
+                  val = data.get("returnedValue", {})
+                  models = val.get("deviceModelList")
+                  if models:
+                      print(f"\n[HIT SUCCESS!] Test case '{name}' returned data!")
+                      print(json.dumps(val, ensure_ascii=False)[:500])
+                      # 擷取測量數值
+                      for m in models:
+                          for u in m.get("userDataList", []):
+                              for item in u.get("measurementDataList", []):
+                                  successful_records.append(item)
                       break
-              except Exception as e:
-                  print(f"  -> Region {reg} failed/unsupported: {e}")
+                  else:
+                      print(f"Test case '{name}': null response")
+              except Exception as err:
+                  print(f"Test case '{name}' error: {err}")
 
-          print(f"\n==========================================")
-          print(f"Total blood pressure records found: {len(target_records)}")
-          print(f"==========================================")
+          print(f"\nExtracted total records: {len(successful_records)}")
 
-          # 3. 上傳至 Garmin
-          if target_records:
-              print(f"\n3. Uploading to Garmin Connect...")
+          # 若成功抓出資料，直接寫入 Garmin
+          if successful_records:
+              print("\nUploading to Garmin Connect...")
               uploaded = 0
-              for r in target_records:
+              for item in successful_records:
                   try:
-                      timestamp = getattr(r, 'measure_date', None) or getattr(r, 'timestamp', None) or getattr(r, 'dateTime', None)
-                      systolic = getattr(r, 'systolic', None)
-                      diastolic = getattr(r, 'diastolic', None)
-                      pulse = getattr(r, 'pulse', None) or getattr(r, 'heart_rate', None)
+                      dt_raw = str(item.get("measureDate") or item.get("measurementDate") or item.get("dateTime"))
+                      sys_val = item.get("sys") or item.get("systolic")
+                      dia_val = item.get("dia") or item.get("diastolic")
+                      pulse_val = item.get("pulse") or item.get("heartRate")
 
-                      if isinstance(timestamp, str):
-                          timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                      elif isinstance(timestamp, (int, float)):
-                          timestamp = datetime.fromtimestamp(timestamp / 1000 if timestamp > 1e11 else timestamp)
-
-                      time_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if isinstance(timestamp, datetime) else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                      if len(dt_raw) >= 14:
+                          dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
+                          time_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+                      else:
+                          time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                       garmin.set_blood_pressure(
-                          systolic=int(systolic),
-                          diastolic=int(diastolic),
-                          pulse=int(pulse) if pulse else None,
+                          systolic=int(sys_val),
+                          diastolic=int(dia_val),
+                          pulse=int(pulse_val) if pulse_val else None,
                           timestamp=time_str
                       )
                       uploaded += 1
-                      print(f"  [OK] Synced: {time_str} -> {systolic}/{diastolic} mmHg (HR: {pulse})")
-                  except Exception as err:
-                      print(f"  [Skip/Err] {err} - {r}")
+                      print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                  except Exception as e:
+                      print(f"  [Skip/Err] {e}")
 
-              print(f"\nSuccessfully synced {uploaded}/{len(target_records)} record(s) to Garmin Connect!")
+              print(f"\nSuccessfully synced {uploaded} record(s) to Garmin Connect!")
           EOF
