@@ -37,6 +37,7 @@ jobs:
           from datetime import datetime, timezone, timedelta
           import garth
           import httpx
+          from garminconnect import Garmin
           from omronconnect import OmronClient
 
           # 1. 載入 Garmin Token
@@ -46,10 +47,23 @@ jobs:
               sys.exit(1)
 
           garth.client.loads(garmin_tokens)
+          garmin = Garmin(is_cn=False)
+          garmin.client = garth.client
           print("Garmin session loaded successfully!")
 
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
+
+          # 為 garmin.client 的 underlying session 補齊 headers
+          headers_extra = {
+              "Authorization": f"Bearer {token_str}",
+              "Origin": "https://connect.garmin.com",
+              "Referer": "https://connect.garmin.com/",
+              "di-backend": "connectapi.garmin.com",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+          }
+          if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
+              garth.client.sess.headers.update(headers_extra)
 
           # 2. 登入 OMRON 並抓取血壓
           omron = OmronClient(country='TW')
@@ -85,7 +99,7 @@ jobs:
 
           print(f"Total extracted records from OMRON: {len(raw_records)}")
 
-          # 篩選最新 14 天內紀錄
+          # 篩選最新資料
           cutoff_date = datetime.now() - timedelta(days=14)
           recent_records = []
           for item in raw_records:
@@ -128,48 +142,65 @@ jobs:
                   tz_tw = timezone(timedelta(hours=8))
                   dt_with_tz = dt_local.replace(tzinfo=tz_tw)
                   dt_utc = dt_with_tz.astimezone(timezone.utc)
+                  
+                  local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                  local_iso = dt_local.strftime("%Y-%m-%dT%H:%M:%S")
+                  gmt_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-                  # 測試兩種 Garmin 官方規格的寫入 Payload 格式
+                  # 嘗試三種經過社群驗證的 Garmin 官方規格欄位組合
                   payload_candidates = [
-                      # 格式 A: 陣列包裝 (Garmin Connect Web 批次寫入規格)
-                      [
-                          {
-                              "measurementTimestampLocal": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
-                              "measurementTimestampGMT": dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      # 組合 1: 帶 measurementTime / measurementTimeGMT 物件
+                      ("measurementTime Format", {
+                          "measurementTime": local_iso,
+                          "measurementTimeGMT": gmt_iso,
+                          "systolic": sys_val,
+                          "diastolic": dia_val,
+                          "pulse": pulse_val,
+                          "sourceType": "MANUAL"
+                      }),
+                      # 組合 2: 帶 bloodPressureDTO 物件層級
+                      ("bloodPressureDTO Format", {
+                          "bloodPressureDTO": {
+                              "measurementTimestampLocal": local_iso,
+                              "measurementTimestampGMT": gmt_iso,
                               "systolic": sys_val,
                               "diastolic": dia_val,
                               "pulse": pulse_val,
                               "sourceType": "MANUAL"
                           }
-                      ],
-                      # 格式 B: 物件包裝 (不帶毫秒的标准時間戳)
-                      {
-                          "measurementTimestampLocal": dt_local.strftime("%Y-%m-%dT%H:%M:%S"),
-                          "measurementTimestampGMT": dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                          "systolic": sys_val,
-                          "diastolic": dia_val,
-                          "pulse": pulse_val,
-                          "sourceType": "MANUAL"
-                      }
+                      }),
+                      # 組合 3: 使用原生套件已注入 Bearer 的方法
+                      ("Native SDK Method", None)
                   ]
 
-                  time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
-                  print(f"\nPosting: {time_str} -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
-
+                  print(f"\nSyncing: {local_str} -> {sys_val}/{dia_val} mmHg (Pulse: {pulse_val})")
                   success = False
-                  for idx, bp_payload in enumerate(payload_candidates, 1):
+
+                  for label, p_data in payload_candidates:
                       try:
-                          r = g_client.post(garmin_bp_url, json=bp_payload, headers=garmin_headers)
-                          print(f"  Attempt {idx} Status: HTTP {r.status_code}")
-                          if r.status_code in [200, 201, 204]:
-                              print(f"  [OK] Synced successfully to Garmin Connect!")
+                          if p_data is not None:
+                              r = g_client.post(garmin_bp_url, json=p_data, headers=garmin_headers)
+                              print(f"  [{label}] Status: HTTP {r.status_code}")
+                              if r.status_code in [200, 201, 204]:
+                                  print(f"  [OK] Synced successfully!")
+                                  uploaded += 1
+                                  success = True
+                                  break
+                              else:
+                                  print(f"  [{label}] Response: {r.text[:200]}")
+                          else:
+                              garmin.set_blood_pressure(
+                                  systolic=sys_val,
+                                  diastolic=dia_val,
+                                  pulse=pulse_val,
+                                  timestamp=local_str
+                              )
+                              print(f"  [Native SDK] Successfully uploaded via garmin.set_blood_pressure!")
                               uploaded += 1
                               success = True
                               break
-                          else:
-                              print(f"  Attempt {idx} Response: {r.text}")
                       except Exception as ex:
-                          print(f"  Attempt {idx} Error: {ex}")
+                          print(f"  [{label}] Error: {ex}")
 
           print(f"\n==========================================")
           print(f"Sync complete: {uploaded}/{len(recent_records)} uploaded.")
