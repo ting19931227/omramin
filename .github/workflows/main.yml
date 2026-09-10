@@ -2,6 +2,8 @@ name: Sync OMRON to Garmin
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *' # 每天台灣時間晚上 8 點自動同步
 
 jobs:
   sync:
@@ -10,22 +12,55 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Inspect Omramin Config and Sync Code
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+
+      - name: Generate Config and Sync
+        env:
+          OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
+          OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
         run: |
           python - << 'EOF'
-          with open("omramin.py", "r", encoding="utf-8") as f:
-              code = f.read()
+          import json
+          import os
 
-          print("=== CONFIG FILE PATH SEARCH ===")
-          for line in code.splitlines():
-              if "config" in line.lower() and (".json" in line.lower() or "load" in line.lower() or "path" in line.lower()):
-                  print(line)
+          config_data = {
+              "omron": {
+                  "email": os.environ["OMRON_EMAIL"],
+                  "country": "TW",
+                  "devices": [
+                      {
+                          "name": "HEM-6232T-AP:1",
+                          "macaddr": "b2:ff:fe:c4:e1:3c",
+                          "category": "BPM",
+                          "user": 1,
+                          "enabled": True
+                      }
+                  ]
+              },
+              "garmin": {
+                  "email": os.environ["GARMIN_EMAIL"]
+              }
+          }
 
-          print("\n=== SYNC FUNCTION / DEVICES SEARCH ===")
-          for i, line in enumerate(code.splitlines()):
-              if "no devices configured" in line.lower():
-                  start = max(0, i - 15)
-                  end = min(len(code.splitlines()), i + 10)
-                  print("\n".join(code.splitlines()[start:end]))
-                  break
+          # 寫入當前目錄的 config.json (符合 omramin 優先讀取規則)
+          with open("config.json", "w", encoding="utf-8") as f:
+              json.dump(config_data, f, indent=2)
+
+          print("Generated config.json successfully:")
+          print(json.dumps(config_data, indent=2))
           EOF
+
+          echo "=== 1. Checking configured devices ==="
+          omramin list-devices
+
+          echo "=== 2. Running Sync to Garmin Connect ==="
+          omramin sync --days 90
