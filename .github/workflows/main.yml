@@ -32,6 +32,7 @@ jobs:
           python - << 'EOF'
           import os
           import sys
+          import inspect
           from datetime import datetime
           import garth
           from garminconnect import Garmin
@@ -55,14 +56,23 @@ jobs:
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
 
-          # 傳入必填參數 days
           devices = omron.get_registered_devices(days=90)
           print(f"Found {len(devices)} device(s):", [d.name for d in devices])
+
+          # 檢查 get_measurements 確切簽名
+          sig = inspect.signature(omron.get_measurements)
+          print("omron.get_measurements signature:", sig)
 
           all_records = []
           for dev in devices:
               print(f"\nFetching data for {dev.name} (MAC: {dev.macaddr})...")
-              records = omron.get_measurements(dev, days=90)
+              # 依照無參數調用（預設只傳入 dev）
+              try:
+                  records = omron.get_measurements(dev)
+              except Exception as e:
+                  print(f"get_measurements(dev) failed: {e}")
+                  records = []
+
               if records:
                   print(f"  -> Found {len(records)} record(s)!")
                   all_records.extend(records)
