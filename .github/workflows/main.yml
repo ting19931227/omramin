@@ -32,8 +32,9 @@ jobs:
           python - << 'EOF'
           import os
           import sys
+          import json
           import time
-          from datetime import datetime, timedelta
+          from datetime import datetime, timezone, timedelta
           import garth
           from garminconnect import Garmin
           from omronconnect import OmronClient
@@ -43,38 +44,15 @@ jobs:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
-          # 1. 載入 Garmin 憑證
+          # 1. 載入 Garmin Token
+          print("1. Loading Garmin session...")
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
-
-          # 關鍵修復：主動觸發 Token 刷新檢查
-          try:
-              # 若 access_token 已過期，refresh_oauth2 會使用 refresh_token 換取全新 access_token
-              if hasattr(garth.client, "refresh_oauth2"):
-                  garth.client.refresh_oauth2()
-                  print("OAuth2 Token refreshed successfully.")
-              elif hasattr(garth.client, "refresh"):
-                  garth.client.refresh()
-                  print("Session refreshed successfully.")
-          except Exception as ref_err:
-              print(f"Token refresh attempt notice: {ref_err}")
-
-          # 取得刷新後最新的 Bearer Token
-          oauth2 = getattr(garth.client, "oauth2_token", None)
-          token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
-
-          if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
-              garth.client.sess.headers.update({
-                  "Authorization": f"Bearer {token_str}",
-                  "Origin": "https://connect.garmin.com",
-                  "Referer": "https://connect.garmin.com/",
-                  "di-backend": "connectapi.garmin.com",
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-              })
-          print("Garmin session & Bearer headers configured with active token.")
+          print("Garmin session loaded.")
 
           # 2. 登入 OMRON 並抓取血壓數據
+          print("\n2. Logging into OMRON Connect...")
           omron = OmronClient(country='TW')
           omron.login(os.environ['OMRON_EMAIL'], os.environ['OMRON_PASSWORD'])
           print("OMRON Login successful.")
@@ -116,6 +94,7 @@ jobs:
           recent_records.sort(key=lambda x: x['_parsed_dt'])
           print(f"Syncing {len(recent_records)} record(s) from the last 7 days...")
 
+          # 3. 寫入 Garmin Connect
           uploaded = 0
           for item in recent_records:
               try:
@@ -123,19 +102,52 @@ jobs:
                   sys_val = int(body_indices["1"][0])
                   dia_val = int(body_indices["2"][0])
                   pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
-                  time_str = item['_parsed_dt'].strftime("%Y-%m-%d %H:%M:%S")
+                  dt_local = item['_parsed_dt']
 
-                  garmin.set_blood_pressure(
-                      systolic=sys_val,
-                      diastolic=dia_val,
-                      pulse=pulse_val,
-                      timestamp=time_str
-                  )
-                  uploaded += 1
-                  print(f"  [OK] Synced: {time_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
-                  time.sleep(1.2)
+                  # 台灣時間轉 UTC
+                  tz_tw = timezone(timedelta(hours=8))
+                  dt_with_tz = dt_local.replace(tzinfo=tz_tw)
+                  dt_utc = dt_with_tz.astimezone(timezone.utc)
+                  
+                  local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                  local_iso = dt_local.strftime("%Y-%m-%dT%H:%M:%S.000")
+                  gmt_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+                  # 使用 garth 內建的 connectapi post（自動帶簽名標頭）
+                  bp_data = {
+                      "measurementTimestampLocal": local_iso,
+                      "measurementTimestampGMT": gmt_iso,
+                      "systolic": sys_val,
+                      "diastolic": dia_val,
+                      "pulse": pulse_val,
+                      "sourceType": "MANUAL"
+                  }
+
+                  success = False
+                  # 方式 A: 透過 garth 原生連線通道發送
+                  try:
+                      res = garth.client.post("connectapi", "bloodpressure-service/bloodpressure", json=bp_data)
+                      uploaded += 1
+                      print(f"  [OK] Synced (garth): {local_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                      success = True
+                  except Exception as e_garth:
+                      # 方式 B: 若方式 A 失敗，回退至 garminconnect 介面
+                      try:
+                          garmin.set_blood_pressure(
+                              systolic=sys_val,
+                              diastolic=dia_val,
+                              pulse=pulse_val,
+                              timestamp=local_str
+                          )
+                          uploaded += 1
+                          print(f"  [OK] Synced (garminconnect): {local_str} -> {sys_val}/{dia_val} mmHg (HR: {pulse_val})")
+                          success = True
+                      except Exception as e_gc:
+                          print(f"  [Skip/Err] All methods failed for {local_str}: {e_garth} | {e_gc}")
+
+                  time.sleep(1.5)
               except Exception as err:
-                  print(f"  [Skip/Err] {err} ({time_str})")
+                  print(f"  [Error] {err}")
 
           print(f"\nCompleted: Synced {uploaded}/{len(recent_records)} record(s) to Garmin Connect.")
           EOF
