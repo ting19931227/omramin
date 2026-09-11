@@ -43,11 +43,24 @@ jobs:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
 
-          # 1. 載入 Garmin 憑證與授權標頭
+          # 1. 載入 Garmin 憑證
           garth.client.loads(garmin_tokens)
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
 
+          # 關鍵修復：主動觸發 Token 刷新檢查
+          try:
+              # 若 access_token 已過期，refresh_oauth2 會使用 refresh_token 換取全新 access_token
+              if hasattr(garth.client, "refresh_oauth2"):
+                  garth.client.refresh_oauth2()
+                  print("OAuth2 Token refreshed successfully.")
+              elif hasattr(garth.client, "refresh"):
+                  garth.client.refresh()
+                  print("Session refreshed successfully.")
+          except Exception as ref_err:
+              print(f"Token refresh attempt notice: {ref_err}")
+
+          # 取得刷新後最新的 Bearer Token
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
@@ -59,7 +72,7 @@ jobs:
                   "di-backend": "connectapi.garmin.com",
                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
               })
-          print("Garmin session & Bearer headers configured.")
+          print("Garmin session & Bearer headers configured with active token.")
 
           # 2. 登入 OMRON 並抓取血壓數據
           omron = OmronClient(country='TW')
@@ -100,7 +113,6 @@ jobs:
                       item['_parsed_dt'] = dt_obj
                       recent_records.append(item)
 
-          # 由舊到新排序
           recent_records.sort(key=lambda x: x['_parsed_dt'])
           print(f"Syncing {len(recent_records)} record(s) from the last 7 days...")
 
