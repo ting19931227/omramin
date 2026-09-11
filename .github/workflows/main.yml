@@ -26,63 +26,56 @@ jobs:
         env:
           OMRON_EMAIL: ${{ secrets.OMRON_EMAIL }}
           OMRON_PASSWORD: ${{ secrets.OMRON_PASSWORD }}
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           PYTHONUNBUFFERED: "1"
         run: |
           python - << 'EOF'
           import os
           import sys
+          import json
           import time
-          from datetime import datetime, timedelta
+          from datetime import datetime, timezone, timedelta
           import garth
+          import httpx
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
-          garmin_email = os.environ.get('GARMIN_EMAIL', '').strip()
-          garmin_password = os.environ.get('GARMIN_PASSWORD', '').strip()
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
+          if not garmin_tokens:
+              print("Error: GARMIN_TOKENS is missing.")
+              sys.exit(1)
 
-          print("1. Initializing Garmin Connect connection...")
-          garmin = None
+          print("1. Loading Garmin session from GARMIN_TOKENS...")
+          garth.client.loads(garmin_tokens)
+          garmin = Garmin(is_cn=False)
+          garmin.client = garth.client
 
-          # 優先使用 GitHub Secrets 內的帳號密碼重新取得全新 Token
-          if garmin_email and garmin_password:
-              print(f"-> Attempting login with credentials for: {garmin_email[:3]}***@...")
-              try:
-                  garmin = Garmin(email=garmin_email, password=garmin_password, is_cn=False)
-                  garmin.login()
-                  print("  [OK] Garmin login via credentials successful!")
-              except Exception as e:
-                  print(f"  [Notice] Credentials login encountered: {e}")
-                  garmin = None
+          # 檢查 OAuth1 是否存在
+          oauth1 = getattr(garth.client, "oauth1_token", None)
+          print(f"OAuth1 Long-term Session available: {'Yes' if oauth1 else 'No'}")
 
-          # 若帳密登入因驗證碼受阻，回退至 GARMIN_TOKENS
-          if garmin is None or not getattr(garmin, 'client', None):
-              if garmin_tokens:
-                  print("-> Falling back to GARMIN_TOKENS session...")
-                  garth.client.loads(garmin_tokens)
-                  garmin = Garmin(is_cn=False)
-                  garmin.client = garth.client
-                  print("  [OK] Session loaded from GARMIN_TOKENS.")
-              else:
-                  print("Error: No valid Garmin credentials or tokens available.")
-                  sys.exit(1)
+          # 使用行動端 User-Agent 嘗試安全刷新 OAuth2
+          try:
+              # 偽裝成 Garmin Connect Mobile 進行換票
+              orig_ua = garth.client.sess.headers.get("User-Agent")
+              garth.client.sess.headers["User-Agent"] = "com.garmin.android.apps.connectmobile"
+              garth.client.refresh_oauth2()
+              print("  [OK] Successfully refreshed OAuth2 Token using OAuth1 Session!")
+          except Exception as ref_err:
+              print(f"  [Notice] Standard refresh returned: {ref_err}")
 
-          # 提取登入產生的全新 OAuth2 Bearer Token
+          # 取得最新 Bearer Token
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
-          if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
-              garth.client.sess.headers.update({
-                  "Authorization": f"Bearer {token_str}",
-                  "Origin": "https://connect.garmin.com",
-                  "Referer": "https://connect.garmin.com/",
-                  "di-backend": "connectapi.garmin.com",
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-              })
-          print(f"Garmin headers configured with Bearer Token: {'Yes' if token_str else 'No'}")
+          garmin_headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+              "Origin": "https://connect.garmin.com",
+              "Referer": "https://connect.garmin.com/",
+              "di-backend": "connectapi.garmin.com",
+              "Content-Type": "application/json",
+              "Authorization": f"Bearer {token_str}"
+          }
 
           # 2. 登入 OMRON 並抓取血壓數據
           print("\n2. Logging into OMRON Connect...")
@@ -134,7 +127,12 @@ jobs:
                   sys_val = int(body_indices["1"][0])
                   dia_val = int(body_indices["2"][0])
                   pulse_val = int(body_indices["3"][0]) if "3" in body_indices else None
-                  time_str = item['_parsed_dt'].strftime("%Y-%m-%d %H:%M:%S")
+                  dt_local = item['_parsed_dt']
+                  time_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+
+                  # 注入更新後的 session headers
+                  if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
+                      garth.client.sess.headers.update(garmin_headers)
 
                   garmin.set_blood_pressure(
                       systolic=sys_val,
