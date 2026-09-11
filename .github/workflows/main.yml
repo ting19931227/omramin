@@ -43,8 +43,6 @@ jobs:
           from garminconnect import Garmin
           from omronconnect import OmronClient
 
-          garmin_email = os.environ.get('GARMIN_EMAIL', '').strip()
-          garmin_password = os.environ.get('GARMIN_PASSWORD', '').strip()
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           garmin_proxy = os.environ.get('GARMIN_PROXY', '').strip()
 
@@ -56,40 +54,22 @@ jobs:
                   "https": garmin_proxy
               }
               print("  Proxy successfully configured.")
-          else:
-              print("1. Warning: GARMIN_PROXY is not configured.")
 
-          # 2. 登入 Garmin
-          garmin = None
-          if garmin_email and garmin_password:
-              print(f"-> Attempting login with credentials for: {garmin_email[:3]}***...")
+          # 2. 載入憑證並透過 Proxy 換取全新 Bearer Token
+          if garmin_tokens:
+              print("-> Using GARMIN_TOKENS with Proxy refresh...")
+              garth.client.loads(garmin_tokens)
               try:
-                  garmin = Garmin(email=garmin_email, password=garmin_password, is_cn=False)
-                  if garmin_proxy:
-                      garmin.client.sess.proxies = {"http": garmin_proxy, "https": garmin_proxy}
-                  garmin.login()
-                  print("  [OK] Garmin login via credentials successful!")
-              except Exception as e:
-                  print(f"  [Notice] Credentials login returned: {e}")
-                  garmin = None
+                  garth.client.refresh_oauth2()
+                  print("  [OK] Successfully refreshed OAuth2 Token via Proxy!")
+              except Exception as r_err:
+                  print(f"  [Notice] OAuth2 refresh attempt: {r_err}")
+              garmin = Garmin(is_cn=False)
+              garmin.client = garth.client
+          else:
+              print("Error: GARMIN_TOKENS is missing.")
+              sys.exit(1)
 
-          # 若帳密登入遇阻，使用 GARMIN_TOKENS 並透過 Proxy 換取全新 Bearer Token
-          if garmin is None or not getattr(garmin, 'client', None):
-              if garmin_tokens:
-                  print("-> Using GARMIN_TOKENS with Proxy refresh...")
-                  garth.client.loads(garmin_tokens)
-                  try:
-                      garth.client.refresh_oauth2()
-                      print("  [OK] Successfully refreshed OAuth2 Token via Proxy!")
-                  except Exception as r_err:
-                      print(f"  [Notice] OAuth2 refresh attempt: {r_err}")
-                  garmin = Garmin(is_cn=False)
-                  garmin.client = garth.client
-              else:
-                  print("Error: No valid Garmin credentials or tokens available.")
-                  sys.exit(1)
-
-          # 提取刷新後具備合法效期的 Bearer Token
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
@@ -132,22 +112,28 @@ jobs:
               for s in m.get("deviceSerialIDList", []):
                   raw_records.extend(s.get("measureList", []))
 
-          # 篩選最近 7 天內的紀錄
-          cutoff_date = datetime.now() - timedelta(days=7)
-          recent_records = []
+          # 關鍵修改：以台灣時間 (UTC+8) 計算昨天的 00:00:00，只保留昨天與今天的資料
+          tz_tw = timezone(timedelta(hours=8))
+          now_tw = datetime.now(tz_tw)
+          today_midnight = now_tw.replace(hour=0, minute=0, second=0, microsecond=0)
+          yesterday_midnight = (today_midnight - timedelta(days=1)).replace(tzinfo=None)
+
+          print(f"Filtering records from yesterday onwards (>= {yesterday_midnight.strftime('%Y-%m-%d %H:%M:%S')})...")
+
+          target_records = []
           for item in raw_records:
               dt_raw = str(item.get("measureDeviceDateFrom") or "")
               if len(dt_raw) >= 14:
                   dt_obj = datetime.strptime(dt_raw[:14], "%Y%m%d%H%M%S")
-                  if dt_obj >= cutoff_date:
+                  if dt_obj >= yesterday_midnight:
                       item['_parsed_dt'] = dt_obj
-                      recent_records.append(item)
+                      target_records.append(item)
 
-          recent_records.sort(key=lambda x: x['_parsed_dt'])
-          print(f"Syncing {len(recent_records)} record(s) from the last 7 days...")
+          target_records.sort(key=lambda x: x['_parsed_dt'])
+          print(f"Syncing {len(target_records)} record(s) from yesterday & today...")
 
           uploaded = 0
-          for item in recent_records:
+          for item in target_records:
               try:
                   body_indices = item.get("bodyIndexList", {})
                   sys_val = int(body_indices["1"][0])
@@ -167,5 +153,5 @@ jobs:
               except Exception as err:
                   print(f"  [Skip/Err] {err} ({time_str})")
 
-          print(f"\nCompleted: Synced {uploaded}/{len(recent_records)} record(s) to Garmin Connect.")
+          print(f"\nCompleted: Synced {uploaded}/{len(target_records)} record(s) to Garmin Connect.")
           EOF
