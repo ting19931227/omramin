@@ -79,4 +79,3 @@ jobs:
               sync_garmin(withings, garmin_client, None)
           print("Sync completed successfully!")
           EOF
-```[cite: 21, 22]
