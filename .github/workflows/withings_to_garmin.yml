@@ -63,9 +63,11 @@ jobs:
               else:
                   print(f"Token notice: {t_res.get('error')}, using current access token...")
 
-          # 2. 抓取 Withings 過去 7 天的測量資料
-          print("Fetching measurements from Withings...")
-          start_ts = int((datetime.datetime.now() - datetime.timedelta(days=7)).timestamp())
+          # 2. 抓取 Withings 今天的測量資料（從今天 00:00:00 起算）
+          today_midnight = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+          start_ts = int(today_midnight.timestamp())
+          print(f"Fetching measurements from Withings (Today only: >= {today_midnight})...")
+
           m_res = requests.post(
               "https://wbsapi.withings.net/measure",
               headers={"Authorization": f"Bearer {access_token}"},
@@ -90,103 +92,4 @@ jobs:
               fat = None
               for m in grp.get("measures", []):
                   m_type = m.get("type")
-                  real_val = m.get("value") * (10 ** m.get("unit"))
-                  if m_type == 1:
-                      weight = round(real_val, 2)
-                  elif m_type == 6:
-                      fat = round(real_val, 2)
-
-              if weight is not None:
-                  records.append({"dt": dt, "epoch": epoch, "weight": weight, "fat": fat})
-
-          if not records:
-              print("No weight measurements recorded in the last 7 days.")
-              sys.exit(0)
-
-          records.sort(key=lambda x: x["epoch"])
-          print(f"Found {len(records)} record(s) to sync.")
-
-          # 3. 配置 Garmin 連線（Token + Proxy 續期）
-          proxy = os.environ.get('GARMIN_PROXY', '').strip()
-          if proxy:
-              garth.client.sess.proxies = {"http": proxy, "https": proxy}
-
-          garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
-          if not garmin_tokens:
-              print("Error: GARMIN_TOKENS is missing.")
-              sys.exit(1)
-
-          garth.client.loads(garmin_tokens)
-          try:
-              if hasattr(garth.client, "refresh_oauth2"):
-                  garth.client.refresh_oauth2()
-                  print("Garmin Token refreshed successfully via Proxy!")
-          except Exception as e:
-              print(f"Token notice: {e}")
-
-          # 設定寫入 Headers
-          oauth2 = getattr(garth.client, "oauth2_token", None)
-          token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
-
-          if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
-              garth.client.sess.headers.update({
-                  "Authorization": f"Bearer {token_str}",
-                  "Origin": "https://connect.garmin.com",
-                  "Referer": "https://connect.garmin.com/",
-                  "di-backend": "connectapi.garmin.com",
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-              })
-
-          garmin = Garmin(is_cn=False)
-          garmin.client = garth.client
-
-          # 4. 上傳體重與體脂率
-          success_count = 0
-          for r in records:
-              date_str = r['dt'].strftime("%Y-%m-%d %H:%M:%S")
-              print(f"Uploading: {date_str} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
-              uploaded = False
-
-              # 優先嘗試 SDK 內建方法
-              for method_name in ["set_body_composition", "add_body_composition", "add_weigh_in"]:
-                  if hasattr(garmin, method_name):
-                      try:
-                          fn = getattr(garmin, method_name)
-                          kwargs = {"weight": r["weight"], "timestamp": date_str}
-                          varnames = fn.__code__.co_varnames
-                          if r["fat"] is not None and "percent_fat" in varnames:
-                              kwargs["percent_fat"] = r["fat"]
-                          elif r["fat"] is not None and "fat" in varnames:
-                              kwargs["fat"] = r["fat"]
-                          fn(**kwargs)
-                          print(f"  [OK] Uploaded via garmin.{method_name}!")
-                          uploaded = True
-                          break
-                      except Exception:
-                          pass
-
-              # 備用：調用官方 REST 寫入端點
-              if not uploaded:
-                  payload = {
-                      "weight": r["weight"] * 1000,
-                      "date": r["dt"].strftime("%Y-%m-%d"),
-                      "timestamp": r["epoch"] * 1000
-                  }
-                  if r["fat"] is not None:
-                      payload["percentFat"] = r["fat"]
-
-                  for ep in ["weight-service/weight-record", "weight-service/weight/userTransactionRecord"]:
-                      try:
-                          res = garth.client.post("connectapi", ep, json=payload)
-                          if res.status_code in [200, 201, 204]:
-                              print(f"  [OK] Uploaded via {ep} (HTTP {res.status_code})")
-                              uploaded = True
-                              break
-                      except Exception:
-                          pass
-
-              if uploaded:
-                  success_count += 1
-
-          print(f"\nSync completed: {success_count}/{len(records)} record(s) synced to Garmin Connect.")
-          EOF
+                  real_val = m.get("value") * (10 **
