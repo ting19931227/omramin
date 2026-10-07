@@ -68,11 +68,12 @@ jobs:
           garmin_sync.client = Garmin(is_cn=False)
           garmin_sync.client.client = garth.client
 
-          # 5. 從 Withings 抓取最近 7 天的測量資料
+          # 5. 從 Withings 抓取最近 7 天的測量資料（補齊 startdate 與 enddate）
           print("Fetching measurements from Withings...")
           withings = WithingsAccount()
-          start_date = datetime.date.today() - datetime.timedelta(days=7)
-          groups = withings.get_measurements(startdate=start_date)
+          today = datetime.date.today()
+          start_date = today - datetime.timedelta(days=7)
+          groups = withings.get_measurements(startdate=start_date, enddate=today)
 
           # 6. 打包成 FIT 身體組成檔案並直接上傳 Garmin
           fit = Fit()
