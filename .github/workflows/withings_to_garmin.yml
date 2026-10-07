@@ -18,7 +18,7 @@ jobs:
         run: |
           pip install withings-sync garminconnect garth requests
 
-      - name: Direct Sync with Token
+      - name: Sync Withings to Garmin
         env:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
@@ -29,18 +29,13 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          import json
           import garth
-          from garminconnect import Garmin
-          from withings_sync.sync import WithingsAccount, sync_garmin
-          from withings_sync.garmin import GarminConnect
 
-          # 1. 還原 Withings 憑證檔
+          # 1. 還原 Withings 憑證
           withings_json = os.environ.get('WITHINGS_USER_JSON')
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
               sys.exit(1)
-
           home_dir = os.path.expanduser('~')
           with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
               f.write(withings_json)
@@ -49,33 +44,26 @@ jobs:
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
-              print("Proxy configured for Garmin.")
 
-          # 3. 載入 Garmin Token 並刷新
+          # 3. 載入並刷新 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
               sys.exit(1)
-
           garth.client.loads(garmin_tokens)
           try:
               if hasattr(garth.client, "refresh_oauth2"):
                   garth.client.refresh_oauth2()
-                  print("Garmin OAuth2 Token refreshed successfully via Proxy!")
+                  print("Garmin Token refreshed successfully!")
           except Exception as e:
-              print(f"Token refresh notice: {e}")
+              print(f"Token notice: {e}")
 
-          # 4. 初始化 GarminConnect 物件，直接接管已認證的 garth client
-          garmin_client = GarminConnect()
-          garmin_client.client = Garmin(is_cn=False)
-          garmin_client.client.client = garth.client
-
-          # 5. 取得 Withings 數據並直接同步至 Garmin
-          print("Connecting to Withings and syncing to Garmin...")
-          withings = WithingsAccount()
-          try:
-              sync_garmin(withings, garmin_client)
-          except TypeError:
-              sync_garmin(withings, garmin_client, None)
-          print("Sync completed successfully!")
+          # 4. 保存到 ~/.garth 目錄供 withings-sync 直接使用
+          garth_dir = os.path.join(home_dir, '.garth')
+          os.makedirs(garth_dir, exist_ok=True)
+          garth.client.dump(garth_dir)
+          print("Garmin credentials prepared successfully!")
           EOF
+
+          # 5. 執行原生 withings-sync，自動使用 ~/.garth 免密碼上傳最近 7 天數據
+          withings-sync --no-upload=False --fromdate $(date -d "7 days ago" +%Y-%m-%d)
