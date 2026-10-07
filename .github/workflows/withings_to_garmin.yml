@@ -33,8 +33,9 @@ jobs:
           import datetime
           import requests
           import garth
+          from garminconnect import Garmin
 
-          # 1. 讀取 Withings 憑證
+          # 1. 讀取 Withings 憑證並自動刷新
           withings_raw = os.environ.get('WITHINGS_USER_JSON', '').strip()
           client_id = os.environ.get('WITHINGS_CLIENT_ID', '').strip()
           client_secret = os.environ.get('WITHINGS_CLIENT_SECRET', '').strip()
@@ -47,7 +48,6 @@ jobs:
           refresh_token = user_data.get('refresh_token')
           access_token = user_data.get('access_token')
 
-          # 自動刷新 Token
           if refresh_token:
               print("Refreshing Withings token...")
               t_res = requests.post("https://wbsapi.withings.net/v2/oauth2", data={
@@ -103,6 +103,8 @@ jobs:
               print("No weight measurements recorded in the last 7 days.")
               sys.exit(0)
 
+          # 依量測時間先後排序
+          records.sort(key=lambda x: x["epoch"])
           print(f"Found {len(records)} record(s) to sync.")
 
           # 3. 配置 Garmin 連線
@@ -123,22 +125,57 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 4. 上傳體重與體脂率
+          # 取得最新 OAuth2 Token 並配置 Headers
+          oauth2 = getattr(garth.client, "oauth2_token", None)
+          token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
+
+          if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
+              garth.client.sess.headers.update({
+                  "Authorization": f"Bearer {token_str}",
+                  "Origin": "https://connect.garmin.com",
+                  "Referer": "https://connect.garmin.com/",
+                  "di-backend": "connectapi.garmin.com",
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+              })
+
+          garmin = Garmin(is_cn=False)
+          garmin.client = garth.client
+
+          # 4. 上傳體重與體脂率至 Garmin
+          success_count = 0
           for r in records:
-              upload_payload = {
-                  "weight": r["weight"] * 1000,
-                  "date": r["dt"].strftime("%Y-%m-%d"),
-                  "timestamp": r["epoch"] * 1000
-              }
-              if r["fat"] is not None:
-                  upload_payload["percentFat"] = r["fat"]
+              date_str = r['dt'].strftime("%Y-%m-%d %H:%M:%S")
+              print(f"Uploading: {date_str} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
+              uploaded = False
 
-              print(f"Uploading: {r['dt']} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
-              try:
-                  resp = garth.client.post("connectapi", "weight-service/weight/dateRecords", json=upload_payload)
-                  print(f"  [Result] HTTP {resp.status_code}")
-              except Exception as err:
-                  print(f"  [Error] Upload failed: {err}")
+              # 方法 A：使用原生 garminconnect SDK 方法
+              for method_name in ["set_body_composition", "add_body_composition", "add_weigh_in"]:
+                  if hasattr(garmin, method_name):
+                      try:
+                          fn = getattr(garmin, method_name)
+                          kwargs = {"weight": r["weight"], "timestamp": date_str}
+                          if r["fat"] is not None and "percent_fat" in fn.__code__.co_varnames:
+                              kwargs["percent_fat"] = r["fat"]
+                          elif r["fat"] is not None and "fat" in fn.__code__.co_varnames:
+                              kwargs["fat"] = r["fat"]
+                          fn(**kwargs)
+                          print(f"  [OK] Uploaded via garmin.{method_name}!")
+                          uploaded = True
+                          break
+                      except Exception as fn_err:
+                          pass
 
-          print("Sync completed successfully!")
-          EOF
+              # 方法 B：若 SDK 方法不符合，直接調用 Garmin 官方寫入端點
+              if not uploaded:
+                  payload = {
+                      "weight": r["weight"] * 1000,
+                      "date": r["dt"].strftime("%Y-%m-%d"),
+                      "timestamp": r["epoch"] * 1000
+                  }
+                  if r["fat"] is not None:
+                      payload["percentFat"] = r["fat"]
+
+                  # 嘗試官方兩個主要的寫入端點
+                  for ep in ["weight-service/weight-record", "weight-service/weight/userTransactionRecord"]:
+                      try:
+                          res = garth.client.post("
