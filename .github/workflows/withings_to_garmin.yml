@@ -18,7 +18,7 @@ jobs:
         run: |
           pip install withings-sync garminconnect garth requests
 
-      - name: Sync Weight and Body Fat to Garmin
+      - name: Sync Weight and Fat to Garmin
         env:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
@@ -29,89 +29,57 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          import json
           import datetime
           import garth
-          import requests
+          from withings_sync.sync import WithingsAccount
 
-          # 1. 讀取 Withings 憑證並更新 Access Token
-          withings_json_str = os.environ.get('WITHINGS_USER_JSON', '').strip()
-          client_id = os.environ.get('WITHINGS_CLIENT_ID', '').strip()
-          client_secret = os.environ.get('WITHINGS_CLIENT_SECRET', '').strip()
-
-          if not withings_json_str or not client_id or not client_secret:
-              print("Error: Missing Withings secrets.")
+          # 1. 還原 Withings 授權憑證檔
+          withings_json = os.environ.get('WITHINGS_USER_JSON', '').strip()
+          if not withings_json:
+              print("Error: WITHINGS_USER_JSON is missing.")
               sys.exit(1)
 
-          user_data = json.loads(withings_json_str)
-          refresh_token = user_data.get('refresh_token')
+          home_dir = os.path.expanduser('~')
+          with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
+              f.write(withings_json)
 
-          print("Refreshing Withings token...")
-          token_resp = requests.post("https://wbsapi.withings.net/v2/oauth2", data={
-              "action": "requesttoken",
-              "grant_type": "refresh_token",
-              "client_id": client_id,
-              "client_secret": client_secret,
-              "refresh_token": refresh_token
-          }).json()
-
-          if token_resp.get("status") != 0:
-              print(f"Withings token refresh warning: {token_resp}, using existing token...")
-              access_token = user_data.get('access_token')
-          else:
-              access_token = token_resp["body"]["access_token"]
-              print("Withings token refreshed successfully!")
-
-          # 2. 向 Withings 抓取過去 7 天的測量資料
-          print("Fetching measurements from Withings...")
-          start_timestamp = int((datetime.datetime.now() - datetime.timedelta(days=7)).timestamp())
-          meas_resp = requests.post("https://wbsapi.withings.net/measure", headers={
-              "Authorization": f"Bearer {access_token}"
-          }, data={
-              "action": "getmeas",
-              "meastype": "1,6",  # 1 = Weight, 6 = Fat Percentage
-              "category": 1,
-              "startdate": start_timestamp
-          }).json()
-
-          if meas_resp.get("status") != 0:
-              print(f"Failed to fetch measurements: {meas_resp}")
-              sys.exit(1)
-
-          meas_groups = meas_resp.get("body", {}).get("measuregrps", [])
-          print(f"Retrieved {len(meas_groups)} measurement group(s) from Withings.")
+          # 2. 透過 WithingsAccount 自動刷新並連線
+          print("Connecting to Withings and refreshing credentials...")
+          withings = WithingsAccount()
+          start_date = datetime.date.today() - datetime.timedelta(days=7)
+          groups = withings.get_measurements(startdate=start_date)
 
           # 3. 提取體重與體脂率
           records = []
-          for grp in meas_groups:
-              date_epoch = grp.get("date")
-              dt = datetime.datetime.fromtimestamp(date_epoch)
+          for grp in groups:
               weight = None
-              fat_percent = None
+              fat = None
+              dt = grp.get_datetime()
+              epoch = int(dt.timestamp())
 
-              for m in grp.get("measures", []):
-                  m_type = m.get("type")
-                  val = m.get("value") * (10 ** m.get("unit"))
-                  if m_type == 1:
-                      weight = round(val, 2)
-                  elif m_type == 6:
-                      fat_percent = round(val, 2)
+              # 檢查該測量組包含的數值
+              for meas in grp.measures:
+                  # type 1 = Weight, type 6 = Fat Percentage
+                  if getattr(meas, 'type', None) == 1:
+                      weight = round(meas.get_value(), 2)
+                  elif getattr(meas, 'type', None) == 6:
+                      fat = round(meas.get_value(), 2)
 
               if weight is not None:
                   records.append({
                       "dt": dt,
-                      "epoch": date_epoch,
+                      "epoch": epoch,
                       "weight": weight,
-                      "fat": fat_percent
+                      "fat": fat
                   })
 
           if not records:
-              print("No valid weight data found in the last 7 days.")
+              print("No new weight measurements found in the last 7 days.")
               sys.exit(0)
 
-          print(f"Found {len(records)} record(s) to sync.")
+          print(f"Found {len(records)} valid record(s) to sync.")
 
-          # 4. 配置 Garmin 連線（載入 Token + Webshare 代理）
+          # 4. 配置 Garmin 連線（Token + Proxy）
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
@@ -132,7 +100,7 @@ jobs:
           # 5. 上傳體重與體脂率至 Garmin Connect
           for r in records:
               payload = {
-                  "weight": r["weight"] * 1000, # Garmin 接受公克 (g)
+                  "weight": r["weight"] * 1000, # 轉換為公克 (g)
                   "date": r["dt"].strftime("%Y-%m-%d"),
                   "timestamp": r["epoch"] * 1000
               }
