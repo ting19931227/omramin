@@ -1,0 +1,46 @@
+name: Sync Withings to Garmin
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 12 * * *' # 每天台灣時間 20:15 自動執行
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install withings-sync requests
+
+      - name: Restore Withings Token & Sync to Garmin
+        env:
+          WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
+          WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
+          WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
+          GARMIN_USERNAME: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
+          GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
+          HTTPS_PROXY: ${{ secrets.GARMIN_PROXY }}
+          HTTP_PROXY: ${{ secrets.GARMIN_PROXY }}
+        run: |
+          # 1. 還原 Withings 授權 Token
+          echo "$WITHINGS_USER_JSON" > ~/.withings_user.json
+
+          # 2. 如果有 Garmin Token，直接寫入 garth 憑證目錄避開 429 封鎖
+          if [ -n "$GARMIN_TOKENS" ]; then
+            mkdir -p ~/.garth
+            echo "$GARMIN_TOKENS" > ~/.garth/.garth.json || true
+          fi
+
+          # 3. 執行 Withings 到 Garmin 的數據轉換與上傳
+          withings-sync \
+            --garmin-username "$GARMIN_USERNAME" \
+            --garmin-password "$GARMIN_PASSWORD" \
+            --fromdate $(date -d "7 days ago" +%Y-%m-%d)
