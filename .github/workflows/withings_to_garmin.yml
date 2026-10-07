@@ -73,7 +73,10 @@ jobs:
           # 5. 取得 Withings 數據並直接同步至 Garmin
           print("Connecting to Withings and syncing to Garmin...")
           withings = WithingsAccount()
-          sync_garmin(withings, garmin_client, None, None, False)
+          try:
+              sync_garmin(withings, garmin_client)
+          except TypeError:
+              sync_garmin(withings, garmin_client, None)
           print("Sync completed successfully!")
           EOF
-          ```[cite: 22]
+```[cite: 21, 22]
