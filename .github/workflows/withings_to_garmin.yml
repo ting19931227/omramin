@@ -33,6 +33,7 @@ jobs:
           import datetime
           import requests
           import garth
+          from garminconnect import Garmin
 
           # 1. 讀取 Withings 憑證並自動刷新
           withings_raw = os.environ.get('WITHINGS_USER_JSON', '').strip()
@@ -127,7 +128,7 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 設定 Garmin 寫入標頭
+          # 設定寫入標頭與 Client
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
@@ -140,50 +141,53 @@ jobs:
                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
               })
 
+          garmin = Garmin(is_cn=False)
+          garmin.client = garth.client
+
           # 4. 上傳今日體重與體脂率
           success_count = 0
           for r in records:
-              time_str = r['dt'].strftime("%Y-%m-%dT%H:%M:%S")
-              print(f"\nProcessing: {time_str} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
+              # 轉為 ISO-8601 UTC 字串
+              dt_utc = r['dt'].astimezone(datetime.timezone.utc)
+              time_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+              time_local = r['dt'].strftime("%Y-%m-%d %H:%M:%S")
 
-              # 格式 1：Garmin 官方 Web 端點接收的標準格式
-              payload_kg = {
-                  "weight": r["weight"],
-                  "unitKey": "kg",
-                  "date": r["dt"].strftime("%Y-%m-%d"),
-                  "measurementTimestampLocal": time_str
-              }
-              if r["fat"] is not None:
-                  payload_kg["percentFat"] = r["fat"]
-
-              # 格式 2：以公克為單位的格式
-              payload_g = {
-                  "weight": r["weight"] * 1000,
-                  "unitKey": "g",
-                  "date": r["dt"].strftime("%Y-%m-%d"),
-                  "timestamp": r["epoch"] * 1000
-              }
-              if r["fat"] is not None:
-                  payload_g["percentFat"] = r["fat"]
-
+              print(f"\nUploading: {time_local} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
               uploaded = False
-              endpoints = [
-                  ("weight-service/weight-record", payload_kg),
-                  ("weight-service/weight-record", payload_g),
-                  ("weight-service/user-weight", payload_kg)
-              ]
 
-              for ep, payload in endpoints:
+              # 優先使用 garminconnect 原生 SDK
+              try:
+                  if hasattr(garmin, "set_body_composition"):
+                      kwargs = {
+                          "timestamp": time_local,
+                          "weight": r["weight"]
+                      }
+                      if r["fat"] is not None:
+                          kwargs["percent_fat"] = r["fat"]
+                      garmin.set_body_composition(**kwargs)
+                      print("  [OK] Uploaded via garmin.set_body_composition!")
+                      uploaded = True
+              except Exception as sdk_err:
+                  print(f"  [Detail] SDK method exception: {sdk_err}")
+
+              # 備用方案：直傳 user-weight 端點
+              if not uploaded:
+                  payload = {
+                      "date": r["dt"].strftime("%Y-%m-%d"),
+                      "weight": r["weight"] * 1000,
+                      "unitKey": "kg"
+                  }
+                  if r["fat"] is not None:
+                      payload["percentFat"] = r["fat"]
                   try:
-                      res = garth.client.post("connectapi", ep, json=payload)
+                      res = garth.client.post("connectapi", "weight-service/user-weight", json=payload)
                       if res.status_code in [200, 201, 204]:
-                          print(f"  [OK] Uploaded via {ep} (HTTP {res.status_code})")
+                          print("  [OK] Uploaded via user-weight endpoint!")
                           uploaded = True
-                          break
                       else:
-                          print(f"  [Detail] {ep} -> HTTP {res.status_code}: {res.text}")
-                  except Exception as req_err:
-                      print(f"  [Detail] {ep} exception: {req_err}")
+                          print(f"  [Detail] Endpoint response {res.status_code}: {res.text}")
+                  except Exception as ep_err:
+                      print(f"  [Detail] Endpoint exception: {ep_err}")
 
               if uploaded:
                   success_count += 1
