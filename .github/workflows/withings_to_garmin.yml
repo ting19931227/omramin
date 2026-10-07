@@ -3,7 +3,7 @@ name: Sync Withings to Garmin
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 12 * * *' # 每天台灣時間 20:15 自動執行
+    - cron: '15 12 * * *'
 
 jobs:
   sync:
@@ -40,7 +40,7 @@ jobs:
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
               sys.exit(1)
-          
+
           home_dir = os.path.expanduser('~')
           with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
               f.write(withings_json)
@@ -76,12 +76,4 @@ jobs:
           sync_garmin(withings, garmin_client, None, None, False)
           print("Sync completed successfully!")
           EOF
-```[cite: 22, 27]
-
----
-
-### 操作步驟：
-1. 貼上後點擊右上角綠色的 **「Commit changes...」** > 再點一次 **「Commit changes」**[cite: 22]。
-2. 前往頂部的 **「Actions」** 標籤頁[cite: 18]。
-3. 點選左側的 **「Sync Withings to Garmin」**[cite: 22]。
-4. 點擊右側的 **「Run workflow ▾」** > 綠色按鈕 **「Run workflow」**[cite: 22]。
+          ```[cite: 22]
