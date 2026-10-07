@@ -23,39 +23,34 @@ jobs:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
-          GARMIN_USERNAME: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
         run: |
           python - << 'EOF'
           import os
           import sys
-          import json
-          import shutil
+          import datetime
           import garth
+          from garminconnect import Garmin
+          from withings_sync.sync import WithingsAccount
+          from withings_sync.fit import Fit
+          from withings_sync.garmin import GarminConnect
 
-          # 1. 建立目標設定資料夾
-          home_dir = os.path.expanduser('~')
-          token_dir = os.path.expanduser('~/.garmin_tokens')
-          os.makedirs(token_dir, exist_ok=True)
-
-          # 2. 還原 Withings 憑證檔（同時放入根目錄與 config 目錄）
+          # 1. 還原 Withings 授權憑證
           withings_json = os.environ.get('WITHINGS_USER_JSON')
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
               sys.exit(1)
-
+          home_dir = os.path.expanduser('~')
           with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
               f.write(withings_json)
-          with open(os.path.join(token_dir, '.withings_user.json'), 'w') as f:
-              f.write(withings_json)
 
-          # 3. 掛載 Webshare Proxy 避免換票被 429 阻擋
+          # 2. 掛載 Proxy 避免 Garmin 換票被 429 阻擋
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
 
-          # 4. 載入並刷新 Garmin Token
+          # 3. 載入並刷新 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
@@ -68,15 +63,25 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 5. 把 Garmin token 寫入 tokenstore
-          garth.client.dump(token_dir)
-          with open(os.path.join(token_dir, 'tokens.json'), 'w') as f:
-              f.write(garmin_tokens)
-          print("All credentials prepared successfully!")
-          EOF
+          # 4. 接管 GarminConnect 物件，注入已通過驗證的 Session
+          garmin_sync = GarminConnect()
+          garmin_sync.client = Garmin(is_cn=False)
+          garmin_sync.client.client = garth.client
 
-          # 6. 執行同步，此時 Withings 與 Garmin 憑證皆齊全
-          withings-sync \
-            --features WEIGHT \
-            --fromdate $(date -d "7 days ago" +%Y-%m-%d) \
-            --config-folder ~/.garmin_tokens
+          # 5. 從 Withings 抓取最近 7 天的測量資料
+          print("Fetching measurements from Withings...")
+          withings = WithingsAccount()
+          start_date = datetime.date.today() - datetime.timedelta(days=7)
+          groups = withings.get_measurements(startdate=start_date)
+
+          # 6. 打包成 FIT 身體組成檔案並直接上傳 Garmin
+          fit = Fit()
+          fit_data = fit.write(groups)
+
+          if not fit_data or fit_data.getvalue() == b'':
+              print("No valid weight data found to upload.")
+          else:
+              print("Uploading body composition FIT data to Garmin Connect...")
+              garmin_sync.upload_file(fit_data)
+              print("Successfully uploaded Withings measurements to Garmin!")
+          EOF
