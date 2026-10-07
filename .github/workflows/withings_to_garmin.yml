@@ -43,13 +43,14 @@ jobs:
           with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
               f.write(withings_json)
 
-          # 2. 透過 WithingsAccount 自動刷新並連線
+          # 2. 透過 WithingsAccount 自動連線並帶齊 startdate 與 enddate
           print("Connecting to Withings and refreshing credentials...")
           withings = WithingsAccount()
-          start_date = datetime.date.today() - datetime.timedelta(days=7)
-          groups = withings.get_measurements(startdate=start_date)
+          today = datetime.date.today()
+          start_date = today - datetime.timedelta(days=7)
+          groups = withings.get_measurements(startdate=start_date, enddate=today)
 
-          # 3. 提取體重與體脂率
+          # 3. 僅提取體重 (Weight) 與體脂率 (Fat)
           records = []
           for grp in groups:
               weight = None
@@ -57,13 +58,15 @@ jobs:
               dt = grp.get_datetime()
               epoch = int(dt.timestamp())
 
-              # 檢查該測量組包含的數值
-              for meas in grp.measures:
-                  # type 1 = Weight, type 6 = Fat Percentage
-                  if getattr(meas, 'type', None) == 1:
-                      weight = round(meas.get_value(), 2)
-                  elif getattr(meas, 'type', None) == 6:
-                      fat = round(meas.get_value(), 2)
+              # measures 包含量測數值
+              for meas in getattr(grp, 'measures', []):
+                  m_type = getattr(meas, 'type', None)
+                  val = meas.get_value() if hasattr(meas, 'get_value') else getattr(meas, 'value', None)
+                  # type 1 = 體重 (kg), type 6 = 體脂率 (%)
+                  if m_type == 1 and val is not None:
+                      weight = round(float(val), 2)
+                  elif m_type == 6 and val is not None:
+                      fat = round(float(val), 2)
 
               if weight is not None:
                   records.append({
@@ -74,12 +77,12 @@ jobs:
                   })
 
           if not records:
-              print("No new weight measurements found in the last 7 days.")
+              print("No weight measurements found in the last 7 days.")
               sys.exit(0)
 
-          print(f"Found {len(records)} valid record(s) to sync.")
+          print(f"Found {len(records)} measurement record(s) to sync.")
 
-          # 4. 配置 Garmin 連線（Token + Proxy）
+          # 4. 配置 Garmin 連線（載入 Token + Webshare 代理）
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
@@ -97,7 +100,7 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 5. 上傳體重與體脂率至 Garmin Connect
+          # 5. 直接以 JSON 格式上傳體重與體脂率至 Garmin Connect
           for r in records:
               payload = {
                   "weight": r["weight"] * 1000, # 轉換為公克 (g)
@@ -110,7 +113,7 @@ jobs:
               print(f"Uploading to Garmin: {r['dt']} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
               try:
                   res = garth.client.post("connectapi", "weight-service/weight/dateRecords", json=payload)
-                  print(f"Upload result: {res.status_code}")
+                  print(f"Upload response: {res.status_code}")
               except Exception as err:
                   print(f"Upload failed: {err}")
 
