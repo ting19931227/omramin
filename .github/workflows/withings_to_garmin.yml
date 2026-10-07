@@ -23,6 +23,7 @@ jobs:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
+          GARMIN_USERNAME: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
         run: |
@@ -65,5 +66,8 @@ jobs:
           print("Garmin credentials prepared successfully!")
           EOF
 
-          # 5. 執行原生 withings-sync，自動使用 ~/.garth 上傳最近 7 天數據
-          withings-sync --fromdate $(date -d "7 days ago" +%Y-%m-%d)
+          # 5. 指定同步體重與身體組成數據
+          withings-sync \
+            --garmin-username "$GARMIN_USERNAME" \
+            --features WEIGHT \
+            --fromdate $(date -d "7 days ago" +%Y-%m-%d)
