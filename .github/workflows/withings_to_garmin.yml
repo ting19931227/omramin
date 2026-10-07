@@ -29,15 +29,15 @@ jobs:
           python - << 'EOF'
           import os
           import sys
-          import io
           import datetime
+          import io
           import garth
           from garminconnect import Garmin
           from withings_sync.sync import WithingsAccount
           from withings_sync.garmin import GarminConnect
           import withings_sync.fit as fit_module
 
-          # 1. 還原 Withings 憑證檔
+          # 1. 還原 Withings 授權憑證
           withings_json = os.environ.get('WITHINGS_USER_JSON')
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
@@ -75,34 +75,40 @@ jobs:
           today = datetime.date.today()
           start_date = today - datetime.timedelta(days=7)
           groups = withings.get_measurements(startdate=start_date, enddate=today)
+          print(f"Found {len(groups)} measurement group(s).")
 
-          # 6. 動態產生 FIT 內容並調用 upload_file 上傳
+          # 6. 生成 FIT 檔案
           fit_obj = fit_module.Fit()
-          fit_data = None
+          
+          # 檢查 Fit 實體所提供的方法
+          fit_stream = None
+          for write_method in ['write', 'parse', 'to_fit']:
+              if hasattr(fit_obj, write_method):
+                  fn = getattr(fit_obj, write_method)
+                  try:
+                      res = fn(groups)
+                      if isinstance(res, (bytes, bytearray)):
+                          fit_stream = io.BytesIO(res)
+                      elif hasattr(res, 'getvalue'):
+                          fit_stream = res
+                      break
+                  except Exception as err:
+                      print(f"Fit method {write_method} returned: {err}")
 
-          # 兼容不同版本的 FIT 生成方法
-          for parse_method in ["parse", "write", "generate", "create"]:
-              if hasattr(fit_obj, parse_method):
-                  getattr(fit_obj, parse_method)(groups)
-                  break
+          # 若 fit_obj 內部是自帶 buffer 或是 fit 屬性
+          if fit_stream is None:
+              if hasattr(fit_obj, 'getvalue'):
+                  fit_stream = io.BytesIO(fit_obj.getvalue())
+              elif hasattr(fit_obj, 'fit') and hasattr(fit_obj.fit, 'to_bytes'):
+                  fit_stream = io.BytesIO(fit_obj.fit.to_bytes())
 
-          for bytes_method in ["to_bytes", "getvalue", "get_bytes"]:
-              if hasattr(fit_obj, bytes_method):
-                  fit_data = getattr(fit_obj, bytes_method)()
-                  break
-
-          if fit_data is None and hasattr(fit_obj, "fit"):
-              underlying = getattr(fit_obj, "fit")
-              if hasattr(underlying, "to_bytes"):
-                  fit_data = underlying.to_bytes()
-
-          if not fit_data:
-              print("Notice: No FIT payload generated.")
+          if not fit_stream or len(fit_stream.getvalue()) == 0:
+              print("Error: Failed to generate FIT file stream.")
+              print(f"Fit object attributes: {dir(fit_obj)}")
               sys.exit(1)
 
-          # 封裝為 BytesIO 供 GarminConnect 上傳
-          file_stream = io.BytesIO(fit_data)
-          print("Uploading FIT data to Garmin Connect...")
-          garmin_sync.upload_file(file_stream)
+          # 7. 呼叫 garmin_sync 上傳
+          print(f"Uploading FIT file ({len(fit_stream.getvalue())} bytes) to Garmin Connect...")
+          garmin_sync.upload_file(fit_stream)
           print("Upload completed successfully!")
           EOF
