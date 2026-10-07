@@ -29,14 +29,15 @@ jobs:
           python - << 'EOF'
           import os
           import sys
+          import io
           import datetime
           import garth
           from garminconnect import Garmin
           from withings_sync.sync import WithingsAccount
-          from withings_sync.fit import Fit
           from withings_sync.garmin import GarminConnect
+          import withings_sync.fit as fit_module
 
-          # 1. 還原 Withings 授權憑證
+          # 1. 還原 Withings 憑證檔
           withings_json = os.environ.get('WITHINGS_USER_JSON')
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
@@ -63,26 +64,45 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 4. 接管 GarminConnect 物件，注入已通過驗證的 Session
+          # 4. 接管 GarminConnect 物件，注入已驗證的 client
           garmin_sync = GarminConnect()
           garmin_sync.client = Garmin(is_cn=False)
           garmin_sync.client.client = garth.client
 
-          # 5. 從 Withings 抓取最近 7 天的測量資料（補齊 startdate 與 enddate）
+          # 5. 抓取 Withings 數據
           print("Fetching measurements from Withings...")
           withings = WithingsAccount()
           today = datetime.date.today()
           start_date = today - datetime.timedelta(days=7)
           groups = withings.get_measurements(startdate=start_date, enddate=today)
 
-          # 6. 打包成 FIT 身體組成檔案並直接上傳 Garmin
-          fit = Fit()
-          fit_data = fit.write(groups)
+          # 6. 動態產生 FIT 內容並調用 upload_file 上傳
+          fit_obj = fit_module.Fit()
+          fit_data = None
 
-          if not fit_data or fit_data.getvalue() == b'':
-              print("No valid weight data found to upload.")
-          else:
-              print("Uploading body composition FIT data to Garmin Connect...")
-              garmin_sync.upload_file(fit_data)
-              print("Successfully uploaded Withings measurements to Garmin!")
+          # 兼容不同版本的 FIT 生成方法
+          for parse_method in ["parse", "write", "generate", "create"]:
+              if hasattr(fit_obj, parse_method):
+                  getattr(fit_obj, parse_method)(groups)
+                  break
+
+          for bytes_method in ["to_bytes", "getvalue", "get_bytes"]:
+              if hasattr(fit_obj, bytes_method):
+                  fit_data = getattr(fit_obj, bytes_method)()
+                  break
+
+          if fit_data is None and hasattr(fit_obj, "fit"):
+              underlying = getattr(fit_obj, "fit")
+              if hasattr(underlying, "to_bytes"):
+                  fit_data = underlying.to_bytes()
+
+          if not fit_data:
+              print("Notice: No FIT payload generated.")
+              sys.exit(1)
+
+          # 封裝為 BytesIO 供 GarminConnect 上傳
+          file_stream = io.BytesIO(fit_data)
+          print("Uploading FIT data to Garmin Connect...")
+          garmin_sync.upload_file(file_stream)
+          print("Upload completed successfully!")
           EOF
