@@ -35,7 +35,7 @@ jobs:
           import garth
           from garminconnect import Garmin
 
-          # 1. 讀取 Withings 憑證並自動刷新
+          # 1. 讀取 Withings 憑證並自動換票
           withings_raw = os.environ.get('WITHINGS_USER_JSON', '').strip()
           client_id = os.environ.get('WITHINGS_CLIENT_ID', '').strip()
           client_secret = os.environ.get('WITHINGS_CLIENT_SECRET', '').strip()
@@ -103,11 +103,10 @@ jobs:
               print("No weight measurements recorded in the last 7 days.")
               sys.exit(0)
 
-          # 依量測時間先後排序
           records.sort(key=lambda x: x["epoch"])
           print(f"Found {len(records)} record(s) to sync.")
 
-          # 3. 配置 Garmin 連線
+          # 3. 配置 Garmin 連線（Token + Proxy 續期）
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
@@ -125,7 +124,7 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 取得最新 OAuth2 Token 並配置 Headers
+          # 設定寫入 Headers
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
@@ -141,31 +140,32 @@ jobs:
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
 
-          # 4. 上傳體重與體脂率至 Garmin
+          # 4. 上傳體重與體脂率
           success_count = 0
           for r in records:
               date_str = r['dt'].strftime("%Y-%m-%d %H:%M:%S")
               print(f"Uploading: {date_str} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
               uploaded = False
 
-              # 方法 A：使用原生 garminconnect SDK 方法
+              # 優先嘗試 SDK 內建方法
               for method_name in ["set_body_composition", "add_body_composition", "add_weigh_in"]:
                   if hasattr(garmin, method_name):
                       try:
                           fn = getattr(garmin, method_name)
                           kwargs = {"weight": r["weight"], "timestamp": date_str}
-                          if r["fat"] is not None and "percent_fat" in fn.__code__.co_varnames:
+                          varnames = fn.__code__.co_varnames
+                          if r["fat"] is not None and "percent_fat" in varnames:
                               kwargs["percent_fat"] = r["fat"]
-                          elif r["fat"] is not None and "fat" in fn.__code__.co_varnames:
+                          elif r["fat"] is not None and "fat" in varnames:
                               kwargs["fat"] = r["fat"]
                           fn(**kwargs)
                           print(f"  [OK] Uploaded via garmin.{method_name}!")
                           uploaded = True
                           break
-                      except Exception as fn_err:
+                      except Exception:
                           pass
 
-              # 方法 B：若 SDK 方法不符合，直接調用 Garmin 官方寫入端點
+              # 備用：調用官方 REST 寫入端點
               if not uploaded:
                   payload = {
                       "weight": r["weight"] * 1000,
@@ -175,7 +175,18 @@ jobs:
                   if r["fat"] is not None:
                       payload["percentFat"] = r["fat"]
 
-                  # 嘗試官方兩個主要的寫入端點
                   for ep in ["weight-service/weight-record", "weight-service/weight/userTransactionRecord"]:
                       try:
-                          res = garth.client.post("
+                          res = garth.client.post("connectapi", ep, json=payload)
+                          if res.status_code in [200, 201, 204]:
+                              print(f"  [OK] Uploaded via {ep} (HTTP {res.status_code})")
+                              uploaded = True
+                              break
+                      except Exception:
+                          pass
+
+              if uploaded:
+                  success_count += 1
+
+          print(f"\nSync completed: {success_count}/{len(records)} record(s) synced to Garmin Connect.")
+          EOF
