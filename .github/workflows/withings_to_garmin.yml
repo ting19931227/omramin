@@ -18,33 +18,70 @@ jobs:
         run: |
           pip install withings-sync garminconnect garth requests
 
-      - name: Restore Tokens & Sync to Garmin
+      - name: Direct Sync with Token
         env:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
-          GARMIN_USERNAME: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
-          HTTPS_PROXY: ${{ secrets.GARMIN_PROXY }}
-          HTTP_PROXY: ${{ secrets.GARMIN_PROXY }}
-          ALL_PROXY: ${{ secrets.GARMIN_PROXY }}
         run: |
-          # 1. 還原 Withings 授權 Token
-          echo "$WITHINGS_USER_JSON" > ~/.withings_user.json
+          python - << 'EOF'
+          import os
+          import sys
+          import json
+          import garth
+          from garminconnect import Garmin
+          from withings_sync.sync import WithingsAccount, sync_garmin
+          from withings_sync.garmin import GarminConnect
 
-          # 2. 如果有 Garmin Token，將其寫入預設憑證目錄以確保 withings-sync 讀取
-          if [ -n "$GARMIN_TOKENS" ]; then
-            mkdir -p ~/.garth
-            mkdir -p ~/.garminconnect
-            echo "$GARMIN_TOKENS" > ~/.garth/tokens.json
-            echo "$GARMIN_TOKENS" > ~/.garminconnect/tokens.json
-            echo "$GARMIN_TOKENS" > ~/.garminconnect.json
-          fi
+          # 1. 還原 Withings 憑證檔
+          withings_json = os.environ.get('WITHINGS_USER_JSON')
+          if not withings_json:
+              print("Error: WITHINGS_USER_JSON is missing.")
+              sys.exit(1)
+          
+          home_dir = os.path.expanduser('~')
+          with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
+              f.write(withings_json)
 
-          # 3. 執行同步，並透過全域代理避開 Cloudflare 403 阻擋
-          withings-sync \
-            --garmin-username "$GARMIN_USERNAME" \
-            --garmin-password "$GARMIN_PASSWORD" \
-            --fromdate $(date -d "7 days ago" +%Y-%m-%d)
+          # 2. 掛載 Proxy 避免換票時被 429 阻擋
+          proxy = os.environ.get('GARMIN_PROXY', '').strip()
+          if proxy:
+              garth.client.sess.proxies = {"http": proxy, "https": proxy}
+              print("Proxy configured for Garmin.")
+
+          # 3. 載入 Garmin Token 並刷新
+          garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
+          if not garmin_tokens:
+              print("Error: GARMIN_TOKENS is missing.")
+              sys.exit(1)
+
+          garth.client.loads(garmin_tokens)
+          try:
+              if hasattr(garth.client, "refresh_oauth2"):
+                  garth.client.refresh_oauth2()
+                  print("Garmin OAuth2 Token refreshed successfully via Proxy!")
+          except Exception as e:
+              print(f"Token refresh notice: {e}")
+
+          # 4. 初始化 GarminConnect 物件，直接接管已認證的 garth client
+          garmin_client = GarminConnect()
+          garmin_client.client = Garmin(is_cn=False)
+          garmin_client.client.client = garth.client
+
+          # 5. 取得 Withings 數據並直接同步至 Garmin
+          print("Connecting to Withings and syncing to Garmin...")
+          withings = WithingsAccount()
+          sync_garmin(withings, garmin_client, None, None, False)
+          print("Sync completed successfully!")
+          EOF
+```[cite: 22, 27]
+
+---
+
+### 操作步驟：
+1. 貼上後點擊右上角綠色的 **「Commit changes...」** > 再點一次 **「Commit changes」**[cite: 22]。
+2. 前往頂部的 **「Actions」** 標籤頁[cite: 18]。
+3. 點選左側的 **「Sync Withings to Garmin」**[cite: 22]。
+4. 點擊右側的 **「Run workflow ▾」** > 綠色按鈕 **「Run workflow」**[cite: 22]。
