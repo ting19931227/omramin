@@ -128,7 +128,7 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 設定寫入標頭與 Client
+          # 設定 Garmin 寫入標頭
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
@@ -147,50 +147,22 @@ jobs:
           # 4. 上傳今日體重與體脂率
           success_count = 0
           for r in records:
-              # 轉為 ISO-8601 UTC 字串
-              dt_utc = r['dt'].astimezone(datetime.timezone.utc)
-              time_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
               time_local = r['dt'].strftime("%Y-%m-%d %H:%M:%S")
+              iso_local = r['dt'].strftime("%Y-%m-%dT%H:%M:%S.000")
+              date_only = r['dt'].strftime("%Y-%m-%d")
 
               print(f"\nUploading: {time_local} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
               uploaded = False
 
-              # 優先使用 garminconnect 原生 SDK
-              try:
-                  if hasattr(garmin, "set_body_composition"):
-                      kwargs = {
-                          "timestamp": time_local,
-                          "weight": r["weight"]
-                      }
-                      if r["fat"] is not None:
-                          kwargs["percent_fat"] = r["fat"]
-                      garmin.set_body_composition(**kwargs)
-                      print("  [OK] Uploaded via garmin.set_body_composition!")
-                      uploaded = True
-              except Exception as sdk_err:
-                  print(f"  [Detail] SDK method exception: {sdk_err}")
-
-              # 備用方案：直傳 user-weight 端點
-              if not uploaded:
-                  payload = {
-                      "date": r["dt"].strftime("%Y-%m-%d"),
-                      "weight": r["weight"] * 1000,
-                      "unitKey": "kg"
-                  }
-                  if r["fat"] is not None:
-                      payload["percentFat"] = r["fat"]
-                  try:
-                      res = garth.client.post("connectapi", "weight-service/user-weight", json=payload)
-                      if res.status_code in [200, 201, 204]:
-                          print("  [OK] Uploaded via user-weight endpoint!")
-                          uploaded = True
-                      else:
-                          print(f"  [Detail] Endpoint response {res.status_code}: {res.text}")
-                  except Exception as ep_err:
-                      print(f"  [Detail] Endpoint exception: {ep_err}")
-
-              if uploaded:
-                  success_count += 1
-
-          print(f"\nSync completed: {success_count}/{len(records)} record(s) synced to Garmin Connect.")
-          EOF
+              # 方案 A：嘗試官方 garminconnect 原生所有新增體重函式
+              for fn_name in ["add_weigh_in", "set_body_composition", "add_body_composition"]:
+                  if hasattr(garmin, fn_name):
+                      try:
+                          fn = getattr(garmin, fn_name)
+                          kwargs = {}
+                          varnames = fn.__code__.co_varnames
+                          if "weight" in varnames: kwargs["weight"] = r["weight"]
+                          if "unit" in varnames: kwargs["unit"] = "kg"
+                          if "timestamp" in varnames: kwargs["timestamp"] = time_local
+                          if r["fat"] is not None:
+                              if "percent_fat" in varnames: kwargs["percent_fat"] =
