@@ -31,23 +31,31 @@ jobs:
           import os
           import sys
           import json
+          import shutil
           import garth
 
-          # 1. 還原 Withings 憑證檔
+          # 1. 建立目標設定資料夾
+          home_dir = os.path.expanduser('~')
+          token_dir = os.path.expanduser('~/.garmin_tokens')
+          os.makedirs(token_dir, exist_ok=True)
+
+          # 2. 還原 Withings 憑證檔（同時放入根目錄與 config 目錄）
           withings_json = os.environ.get('WITHINGS_USER_JSON')
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
               sys.exit(1)
-          home_dir = os.path.expanduser('~')
+
           with open(os.path.join(home_dir, '.withings_user.json'), 'w') as f:
               f.write(withings_json)
+          with open(os.path.join(token_dir, '.withings_user.json'), 'w') as f:
+              f.write(withings_json)
 
-          # 2. 掛載 Proxy 避免換票時被 429 阻擋
+          # 3. 掛載 Webshare Proxy 避免換票被 429 阻擋
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
 
-          # 3. 載入並刷新 Garmin Token
+          # 4. 載入並刷新 Garmin Token
           garmin_tokens = os.environ.get('GARMIN_TOKENS', '').strip()
           if not garmin_tokens:
               print("Error: GARMIN_TOKENS is missing.")
@@ -60,18 +68,14 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 4. 把 token 儲存為 python-garminconnect 支援的標準 tokenstore 格式
-          token_dir = os.path.expanduser('~/.garmin_tokens')
-          os.makedirs(token_dir, exist_ok=True)
+          # 5. 把 Garmin token 寫入 tokenstore
           garth.client.dump(token_dir)
-
-          # 建立相容舊版與新版的 session 檔案
           with open(os.path.join(token_dir, 'tokens.json'), 'w') as f:
               f.write(garmin_tokens)
-          print("Garmin tokenstore prepared successfully!")
+          print("All credentials prepared successfully!")
           EOF
 
-          # 5. 指定使用建立好的 token 目錄執行同步，避開帳密認證 403
+          # 6. 執行同步，此時 Withings 與 Garmin 憑證皆齊全
           withings-sync \
             --features WEIGHT \
             --fromdate $(date -d "7 days ago" +%Y-%m-%d) \
