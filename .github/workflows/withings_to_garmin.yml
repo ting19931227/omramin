@@ -23,19 +23,17 @@ jobs:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
+          GARMIN_USERNAME: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
         run: |
           python - << 'EOF'
           import os
           import sys
-          import datetime
+          import json
           import garth
-          from garminconnect import Garmin
-          from withings_sync.sync import WithingsAccount
-          from withings_sync.fit import generate_fit
 
-          # 1. 還原 Withings 授權憑證檔
+          # 1. 還原 Withings 憑證檔
           withings_json = os.environ.get('WITHINGS_USER_JSON')
           if not withings_json:
               print("Error: WITHINGS_USER_JSON is missing.")
@@ -58,29 +56,23 @@ jobs:
           try:
               if hasattr(garth.client, "refresh_oauth2"):
                   garth.client.refresh_oauth2()
-                  print("Garmin Token refreshed successfully via Proxy!")
+                  print("Garmin Token refreshed successfully!")
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 4. 初始化已認證的 Garmin Client
-          garmin = Garmin(is_cn=False)
-          garmin.client = garth.client
+          # 4. 把 token 儲存為 python-garminconnect 支援的標準 tokenstore 格式
+          token_dir = os.path.expanduser('~/.garmin_tokens')
+          os.makedirs(token_dir, exist_ok=True)
+          garth.client.dump(token_dir)
 
-          # 5. 抓取 Withings 最近 7 天的數據
-          print("Fetching measurements from Withings...")
-          withings = WithingsAccount()
-          start_date = datetime.date.today() - datetime.timedelta(days=7)
-          groups = withings.get_measurements(startdate=start_date)
-
-          # 6. 生成 FIT 檔案並直接上傳 Garmin
-          fit_data = generate_fit(groups)
-          if not fit_data or fit_data.getvalue() == b'':
-              print("No new weight data to upload.")
-          else:
-              print("Uploading body composition FIT data to Garmin Connect...")
-              # 利用 garth 原生上傳端點上傳 FIT 檔案
-              files = {"file": ("weight.fit", fit_data.getvalue(), "application/octet-stream")}
-              res = garth.client.post("connectapi", "upload-service/upload", files=files)
-              print(f"Upload completed with response: {res.status_code}")
-              print("Successfully synced Withings measurements to Garmin!")
+          # 建立相容舊版與新版的 session 檔案
+          with open(os.path.join(token_dir, 'tokens.json'), 'w') as f:
+              f.write(garmin_tokens)
+          print("Garmin tokenstore prepared successfully!")
           EOF
+
+          # 5. 指定使用建立好的 token 目錄執行同步，避開帳密認證 403
+          withings-sync \
+            --features WEIGHT \
+            --fromdate $(date -d "7 days ago" +%Y-%m-%d) \
+            --config-folder ~/.garmin_tokens
