@@ -18,19 +18,22 @@ jobs:
         run: |
           pip install withings-sync garminconnect garth requests
 
-      - name: Sync Withings to Garmin
+      - name: Direct Python Sync
         env:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
-          GARMIN_USERNAME: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
         run: |
           python - << 'EOF'
           import os
           import sys
+          import datetime
           import garth
+          from garminconnect import Garmin
+          from withings_sync.sync import WithingsAccount, generate_fit
+          from withings_sync.garmin import GarminConnect
 
           # 1. 還原 Withings 憑證
           withings_json = os.environ.get('WITHINGS_USER_JSON')
@@ -55,19 +58,27 @@ jobs:
           try:
               if hasattr(garth.client, "refresh_oauth2"):
                   garth.client.refresh_oauth2()
-                  print("Garmin Token refreshed successfully!")
+                  print("Garmin Token refreshed successfully via Proxy!")
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 4. 保存到 ~/.garth 目錄供 withings-sync 直接使用
-          garth_dir = os.path.join(home_dir, '.garth')
-          os.makedirs(garth_dir, exist_ok=True)
-          garth.client.dump(garth_dir)
-          print("Garmin credentials prepared successfully!")
-          EOF
+          # 4. 接管 Garmin 連線物件
+          garmin = GarminConnect()
+          garmin.client = Garmin(is_cn=False)
+          garmin.client.client = garth.client
 
-          # 5. 指定同步體重與身體組成數據
-          withings-sync \
-            --garmin-username "$GARMIN_USERNAME" \
-            --features WEIGHT \
-            --fromdate $(date -d "7 days ago" +%Y-%m-%d)
+          # 5. 抓取 Withings 最近 7 天的量測數據
+          print("Fetching measurements from Withings...")
+          withings = WithingsAccount()
+          start_date = datetime.date.today() - datetime.timedelta(days=7)
+          groups = withings.get_measurements(startdate=start_date)
+
+          # 6. 生成 FIT 檔案並直接上傳 Garmin
+          fit_data = generate_fit(groups)
+          if not fit_data or fit_data.getvalue() == b'':
+              print("No new weight/body composition data to upload.")
+          else:
+              print("Uploading FIT data to Garmin...")
+              garmin.upload_file(fit_data)
+              print("Upload to Garmin successful!")
+          EOF
