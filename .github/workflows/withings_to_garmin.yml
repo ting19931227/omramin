@@ -16,7 +16,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install garminconnect garth requests withings-sync
+          pip install garminconnect garth requests
 
       - name: Sync Weight and Fat to Garmin
         env:
@@ -31,13 +31,10 @@ jobs:
           import sys
           import json
           import datetime
-          import io
           import requests
           import garth
-          from withings_sync.fit import Fit
-          from withings_sync.measurement import MeasurementGroup, Measurement
 
-          # 1. 讀取 Withings 憑證並自動換票
+          # 1. 讀取 Withings 憑證並自動刷新
           withings_raw = os.environ.get('WITHINGS_USER_JSON', '').strip()
           client_id = os.environ.get('WITHINGS_CLIENT_ID', '').strip()
           client_secret = os.environ.get('WITHINGS_CLIENT_SECRET', '').strip()
@@ -88,49 +85,31 @@ jobs:
               sys.exit(1)
 
           meas_grps = m_res.get("body", {}).get("measuregrps", [])
-          if not meas_grps:
+          records = []
+          for grp in meas_grps:
+              epoch = grp.get("date")
+              dt = datetime.datetime.fromtimestamp(epoch, tz=tz_tw)
+              weight = None
+              fat = None
+              for m in grp.get("measures", []):
+                  m_type = m.get("type")
+                  real_val = m.get("value") * (10 ** m.get("unit"))
+                  if m_type == 1:
+                      weight = round(real_val, 2)
+                  elif m_type == 6:
+                      fat = round(real_val, 2)
+
+              if weight is not None:
+                  records.append({"dt": dt, "epoch": epoch, "weight": weight, "fat": fat})
+
+          if not records:
               print("No weight measurements recorded today.")
               sys.exit(0)
 
-          # 3. 轉換為 Withings-Sync 標準 MeasurementGroup
-          groups = []
-          for grp in meas_grps:
-              epoch = grp.get("date")
-              meas_list = []
-              has_weight = False
-              for m in grp.get("measures", []):
-                  m_type = m.get("type")
-                  raw_val = m.get("value")
-                  unit = m.get("unit")
-                  if m_type == 1:
-                      has_weight = True
-                  meas_list.append(Measurement(m_type, raw_val, unit))
+          records.sort(key=lambda x: x["epoch"])
+          print(f"Found {len(records)} record(s) from today to sync.")
 
-              if has_weight:
-                  dt_utc = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).replace(tzinfo=None)
-                  mg = MeasurementGroup(dt_utc, meas_list)
-                  groups.append(mg)
-
-          if not groups:
-              print("No valid weight data found in today's records.")
-              sys.exit(0)
-
-          groups.sort(key=lambda x: x.date)
-          print(f"Prepared {len(groups)} valid measurement(s) for FIT encoding.")
-
-          # 4. 打包為 FIT 二進位檔案
-          fit = Fit()
-          for grp in groups:
-              fit.parse(grp)
-          fit_data = fit.to_bytes()
-
-          if not fit_data:
-              print("Error: Generated FIT binary is empty.")
-              sys.exit(1)
-
-          print(f"Generated FIT file ({len(fit_data)} bytes).")
-
-          # 5. 配置 Garmin 連線並換票
+          # 3. 配置 Garmin 連線（Token + Proxy 換票續期）
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
@@ -148,17 +127,66 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 6. 透過 Garmin 官方上傳端點上傳 FIT 檔案
-          print("Uploading FIT file to Garmin Connect...")
-          files = {
-              "file": ("weight.fit", io.BytesIO(fit_data), "application/octet-stream")
-          }
-          upload_res = garth.client.post("connectapi", "upload-service/upload", files=files)
+          # 設定 Garmin 寫入標頭
+          oauth2 = getattr(garth.client, "oauth2_token", None)
+          token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
-          if upload_res.status_code in [200, 201, 202, 204]:
-              print(f"Upload successful! HTTP {upload_res.status_code}")
-              print("Measurements successfully synced to Garmin Connect.")
-          else:
-              print(f"Upload failed: HTTP {upload_res.status_code} - {upload_res.text}")
-              sys.exit(1)
+          if hasattr(garth.client, "sess") and hasattr(garth.client.sess, "headers"):
+              garth.client.sess.headers.update({
+                  "Authorization": f"Bearer {token_str}",
+                  "Origin": "https://connect.garmin.com",
+                  "Referer": "https://connect.garmin.com/",
+                  "di-backend": "connectapi.garmin.com",
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+              })
+
+          # 4. 上傳今日體重與體脂率
+          success_count = 0
+          for r in records:
+              time_str = r['dt'].strftime("%Y-%m-%dT%H:%M:%S")
+              print(f"\nProcessing: {time_str} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
+
+              # 格式 1：Garmin 官方 Web 端點接收的標準格式
+              payload_kg = {
+                  "weight": r["weight"],
+                  "unitKey": "kg",
+                  "date": r["dt"].strftime("%Y-%m-%d"),
+                  "measurementTimestampLocal": time_str
+              }
+              if r["fat"] is not None:
+                  payload_kg["percentFat"] = r["fat"]
+
+              # 格式 2：以公克為單位的格式
+              payload_g = {
+                  "weight": r["weight"] * 1000,
+                  "unitKey": "g",
+                  "date": r["dt"].strftime("%Y-%m-%d"),
+                  "timestamp": r["epoch"] * 1000
+              }
+              if r["fat"] is not None:
+                  payload_g["percentFat"] = r["fat"]
+
+              uploaded = False
+              endpoints = [
+                  ("weight-service/weight-record", payload_kg),
+                  ("weight-service/weight-record", payload_g),
+                  ("weight-service/user-weight", payload_kg)
+              ]
+
+              for ep, payload in endpoints:
+                  try:
+                      res = garth.client.post("connectapi", ep, json=payload)
+                      if res.status_code in [200, 201, 204]:
+                          print(f"  [OK] Uploaded via {ep} (HTTP {res.status_code})")
+                          uploaded = True
+                          break
+                      else:
+                          print(f"  [Detail] {ep} -> HTTP {res.status_code}: {res.text}")
+                  except Exception as req_err:
+                      print(f"  [Detail] {ep} exception: {req_err}")
+
+              if uploaded:
+                  success_count += 1
+
+          print(f"\nSync completed: {success_count}/{len(records)} record(s) synced to Garmin Connect.")
           EOF
