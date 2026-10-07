@@ -65,5 +65,5 @@ jobs:
           print("Garmin credentials prepared successfully!")
           EOF
 
-          # 5. 執行原生 withings-sync，自動使用 ~/.garth 免密碼上傳最近 7 天數據
-          withings-sync --no-upload=False --fromdate $(date -d "7 days ago" +%Y-%m-%d)
+          # 5. 執行原生 withings-sync，自動使用 ~/.garth 上傳最近 7 天數據
+          withings-sync --fromdate $(date -d "7 days ago" +%Y-%m-%d)
