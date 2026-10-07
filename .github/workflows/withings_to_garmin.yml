@@ -16,9 +16,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install withings-sync requests
+          pip install withings-sync garminconnect garth requests
 
-      - name: Restore Withings Token & Sync to Garmin
+      - name: Restore Tokens & Sync to Garmin
         env:
           WITHINGS_CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
@@ -29,17 +29,21 @@ jobs:
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
           HTTPS_PROXY: ${{ secrets.GARMIN_PROXY }}
           HTTP_PROXY: ${{ secrets.GARMIN_PROXY }}
+          ALL_PROXY: ${{ secrets.GARMIN_PROXY }}
         run: |
           # 1. 還原 Withings 授權 Token
           echo "$WITHINGS_USER_JSON" > ~/.withings_user.json
 
-          # 2. 如果有 Garmin Token，直接寫入 garth 憑證目錄避開 429 封鎖
+          # 2. 如果有 Garmin Token，將其寫入預設憑證目錄以確保 withings-sync 讀取
           if [ -n "$GARMIN_TOKENS" ]; then
             mkdir -p ~/.garth
-            echo "$GARMIN_TOKENS" > ~/.garth/.garth.json || true
+            mkdir -p ~/.garminconnect
+            echo "$GARMIN_TOKENS" > ~/.garth/tokens.json
+            echo "$GARMIN_TOKENS" > ~/.garminconnect/tokens.json
+            echo "$GARMIN_TOKENS" > ~/.garminconnect.json
           fi
 
-          # 3. 執行 Withings 到 Garmin 的數據轉換與上傳
+          # 3. 執行同步，並透過全域代理避開 Cloudflare 403 阻擋
           withings-sync \
             --garmin-username "$GARMIN_USERNAME" \
             --garmin-password "$GARMIN_PASSWORD" \
