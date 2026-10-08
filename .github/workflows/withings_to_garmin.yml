@@ -8,9 +8,6 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      secrets: write
-      contents: read
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -19,7 +16,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install garminconnect garth requests pynacl
+          pip install garminconnect garth requests
 
       - name: Sync Weight and Fat to Garmin
         env:
@@ -28,21 +25,17 @@ jobs:
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO_NAME: ${{ github.repository }}
         run: |
           python - << 'EOF'
           import os
           import sys
           import json
           import datetime
-          import base64
           import requests
           import garth
           from garminconnect import Garmin
-          from nacl import encoding, public
 
-          # 1. 讀取 Withings 憑證並換票
+          # 1. 讀取 Withings 憑證並自動換票
           withings_raw = os.environ.get('WITHINGS_USER_JSON', '').strip()
           client_id = os.environ.get('WITHINGS_CLIENT_ID', '').strip()
           client_secret = os.environ.get('WITHINGS_CLIENT_SECRET', '').strip()
@@ -64,40 +57,9 @@ jobs:
                   "client_secret": client_secret,
                   "refresh_token": refresh_token
               }, timeout=10).json()
-
               if t_res.get("status") == 0:
                   access_token = t_res["body"]["access_token"]
-                  new_body = t_res["body"]
                   print("Withings token refreshed successfully!")
-
-                  # 自動將最新的 Token 存回 GitHub Secrets
-                  gh_token = os.environ.get("GITHUB_TOKEN")
-                  repo = os.environ.get("REPO_NAME")
-                  if gh_token and repo:
-                      try:
-                          headers = {
-                              "Authorization": f"token {gh_token}",
-                              "Accept": "application/vnd.github.v3+json"
-                          }
-                          key_data = requests.get(f"https://api.github.com/repos/{repo}/actions/secrets/public-key", headers=headers).json()
-                          public_key_b64 = key_data.get("key")
-                          key_id = key_data.get("key_id")
-
-                          if public_key_b64 and key_id:
-                              public_key = public.PublicKey(public_key_b64.encode("utf-8"), encoding.Base64Encoder())
-                              sealed_box = public.SealedBox(public_key)
-                              encrypted = sealed_box.encrypt(json.dumps(new_body).encode("utf-8"))
-                              encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
-
-                              put_res = requests.put(
-                                  f"https://api.github.com/repos/{repo}/actions/secrets/WITHINGS_USER_JSON",
-                                  headers=headers,
-                                  json={"encrypted_value": encrypted_b64, "key_id": key_id}
-                              )
-                              if put_res.status_code in [201, 204]:
-                                  print("  [Auto-Save] Successfully updated WITHINGS_USER_JSON Secret for next sync!")
-                      except Exception as sec_err:
-                          print(f"  [Notice] Could not auto-update secret: {sec_err}")
               else:
                   print(f"Token notice: {t_res.get('error')}, using current access token...")
 
@@ -127,6 +89,8 @@ jobs:
           records = []
           for grp in meas_grps:
               epoch = grp.get("date")
+              
+              # 精準換算為台灣實際量測時的本地時間（無時區偏置純字串）
               dt_tw = datetime.datetime.fromtimestamp(epoch, tz=tz_tw)
               local_time_str = dt_tw.strftime("%Y-%m-%d %H:%M:%S")
 
