@@ -63,7 +63,7 @@ jobs:
               else:
                   print(f"Token notice: {t_res.get('error')}, using current access token...")
 
-          # 2. 抓取 Withings 當天的測量資料（台灣時間今日 00:00:00 起算）
+          # 2. 以台灣時間（UTC+8）今天凌晨 00:00:00 為查詢起點
           tz_tw = datetime.timezone(datetime.timedelta(hours=8))
           now_tw = datetime.datetime.now(tz_tw)
           today_midnight_tw = datetime.datetime(now_tw.year, now_tw.month, now_tw.day, 0, 0, 0, tzinfo=tz_tw)
@@ -89,7 +89,11 @@ jobs:
           records = []
           for grp in meas_grps:
               epoch = grp.get("date")
-              dt = datetime.datetime.fromtimestamp(epoch, tz=tz_tw)
+              
+              # 精準換算為台灣實際量測時的本地時間（無時區偏置純字串）
+              dt_tw = datetime.datetime.fromtimestamp(epoch, tz=tz_tw)
+              local_time_str = dt_tw.strftime("%Y-%m-%d %H:%M:%S")
+
               weight = None
               fat = None
               for m in grp.get("measures", []):
@@ -101,7 +105,12 @@ jobs:
                       fat = round(real_val, 2)
 
               if weight is not None:
-                  records.append({"dt": dt, "epoch": epoch, "weight": weight, "fat": fat})
+                  records.append({
+                      "local_str": local_time_str,
+                      "epoch": epoch,
+                      "weight": weight,
+                      "fat": fat
+                  })
 
           if not records:
               print("No weight measurements recorded today.")
@@ -110,7 +119,7 @@ jobs:
           records.sort(key=lambda x: x["epoch"])
           print(f"Found {len(records)} record(s) from today to sync.")
 
-          # 3. 配置 Garmin 連線（Token + Proxy 續期）
+          # 3. 配置 Garmin 連線
           proxy = os.environ.get('GARMIN_PROXY', '').strip()
           if proxy:
               garth.client.sess.proxies = {"http": proxy, "https": proxy}
@@ -128,7 +137,6 @@ jobs:
           except Exception as e:
               print(f"Token notice: {e}")
 
-          # 設定寫入 Headers
           oauth2 = getattr(garth.client, "oauth2_token", None)
           token_str = oauth2.get("access_token") if isinstance(oauth2, dict) else getattr(oauth2, "access_token", None)
 
@@ -147,11 +155,10 @@ jobs:
           # 4. 上傳體重與體脂率
           success_count = 0
           for r in records:
-              date_str = r['dt'].strftime("%Y-%m-%d %H:%M:%S")
+              date_str = r['local_str']
               print(f"Uploading: {date_str} -> Weight: {r['weight']} kg, Fat: {r['fat']}%")
               uploaded = False
 
-              # 優先嘗試 SDK 內建方法
               for method_name in ["set_body_composition", "add_body_composition", "add_weigh_in"]:
                   if hasattr(garmin, method_name):
                       try:
@@ -169,11 +176,10 @@ jobs:
                       except Exception:
                           pass
 
-              # 備用：調用官方 REST 寫入端點
               if not uploaded:
                   payload = {
                       "weight": r["weight"] * 1000,
-                      "date": r["dt"].strftime("%Y-%m-%d"),
+                      "date": date_str.split(" ")[0],
                       "timestamp": r["epoch"] * 1000
                   }
                   if r["fat"] is not None:
