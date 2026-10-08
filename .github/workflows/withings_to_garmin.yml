@@ -8,9 +8,6 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      secrets: write
-      contents: read
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -19,7 +16,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install garminconnect garth requests pynacl
+          pip install garminconnect garth requests
 
       - name: Sync Weight and Fat to Garmin
         env:
@@ -28,21 +25,17 @@ jobs:
           WITHINGS_USER_JSON: ${{ secrets.WITHINGS_USER_JSON }}
           GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
           GARMIN_PROXY: ${{ secrets.GARMIN_PROXY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO_NAME: ${{ github.repository }}
         run: |
           python - << 'EOF'
           import os
           import sys
           import json
           import datetime
-          import base64
           import requests
           import garth
           from garminconnect import Garmin
-          from nacl import encoding, public
 
-          # 1. 讀取 Withings 憑證並自動刷新換票
+          # 1. 讀取 Withings 憑證並自動換票
           withings_raw = os.environ.get('WITHINGS_USER_JSON', '').strip()
           client_id = os.environ.get('WITHINGS_CLIENT_ID', '').strip()
           client_secret = os.environ.get('WITHINGS_CLIENT_SECRET', '').strip()
@@ -67,30 +60,11 @@ jobs:
 
               if t_res.get("status") == 0:
                   access_token = t_res["body"]["access_token"]
-                  new_body = t_res["body"]
                   print("Withings token refreshed successfully!")
-
-                  # 自動更新 Token 至 Secrets
-                  gh_token = os.environ.get("GITHUB_TOKEN")
-                  repo = os.environ.get("REPO_NAME")
-                  if gh_token and repo:
-                      try:
-                          headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
-                          key_data = requests.get(f"https://api.github.com/repos/{repo}/actions/secrets/public-key", headers=headers).json()
-                          public_key_b64 = key_data.get("key")
-                          key_id = key_data.get("key_id")
-                          if public_key_b64 and key_id:
-                              pk = public.PublicKey(public_key_b64.encode("utf-8"), encoding.Base64Encoder())
-                              sb = public.SealedBox(pk)
-                              enc = base64.b64encode(sb.encrypt(json.dumps(new_body).encode("utf-8"))).decode("utf-8")
-                              requests.put(f"https://api.github.com/repos/{repo}/actions/secrets/WITHINGS_USER_JSON", headers=headers, json={"encrypted_value": enc, "key_id": key_id})
-                              print("  [Auto-Save] Successfully preserved fresh Withings token for next sync.")
-                      except Exception as sec_err:
-                          print(f"  [Notice] Auto-update token notice: {sec_err}")
               else:
-                  print("Notice: using current access token...")
+                  print(f"Token notice: {t_res.get('error')}, using current access token...")
 
-          # 2. 抓取 Withings 今日測量（台灣時間今日 00:00 起算）
+          # 2. 抓取 Withings 今日測量（以台灣時間今日 00:00 起算）
           tz_tw = datetime.timezone(datetime.timedelta(hours=8))
           now_tw = datetime.datetime.now(tz_tw)
           today_midnight_tw = datetime.datetime(now_tw.year, now_tw.month, now_tw.day, 0, 0, 0, tzinfo=tz_tw)
@@ -112,7 +86,7 @@ jobs:
           records = []
           for grp in meas_grps:
               epoch = grp.get("date")
-              # UTC 時間，供 API 精準對位，防止伺服器二次疊加時區
+              # UTC 時間（提供給 Garmin 寫入，避免時區重複計算）
               dt_utc = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
               dt_tw = datetime.datetime.fromtimestamp(epoch, tz=tz_tw)
 
@@ -175,10 +149,9 @@ jobs:
           garmin = Garmin(is_cn=False)
           garmin.client = garth.client
 
-          # 4. 上傳至 Garmin（修正 UTC 時間戳與體脂過濾）
+          # 4. 上傳至 Garmin（使用標準 UTC 時間戳，過濾無效體脂）
           success_count = 0
           for r in records:
-              # 傳入標準 UTC 時間字串，Garmin 收到後在手機 App 會自動換算為精確的台灣時間（06:53）
               utc_time_str = r['dt_utc'].strftime("%Y-%m-%d %H:%M:%S")
               tw_display_str = r['dt_tw'].strftime("%Y-%m-%d %H:%M:%S")
 
@@ -192,7 +165,7 @@ jobs:
                           fn = getattr(garmin, method_name)
                           kwargs = {"weight": r["weight"], "timestamp": utc_time_str}
                           varnames = fn.__code__.co_varnames
-                          # 若體脂為 None 則不傳遞該參數，避免 Garmin 自動帶入預設值
+                          # 若體脂為 None 則不傳入參數，避免 Garmin 填入預設值
                           if r["fat"] is not None:
                               if "percent_fat" in varnames: kwargs["percent_fat"] = r["fat"]
                               elif "fat" in varnames: kwargs["fat"] = r["fat"]
@@ -216,7 +189,7 @@ jobs:
                       try:
                           res = garth.client.post("connectapi", ep, json=payload)
                           if res.status_code in [200, 201, 204]:
-                              print(f"  [OK] Uploaded via {ep}")
+                              print(f"  [OK] Uploaded via {ep} (HTTP {res.status_code})")
                               uploaded = True
                               break
                       except Exception:
